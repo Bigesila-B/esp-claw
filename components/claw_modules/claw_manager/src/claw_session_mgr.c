@@ -1482,10 +1482,14 @@ esp_err_t claw_session_mgr_visit(claw_session_visit_fn visit, void *ctx)
         cJSON *json = failed ? NULL : cJSON_Parse(text);
         free(text);
         const char *key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "chat_key"));
-        if (!key) err = ESP_ERR_INVALID_RESPONSE;
-        else err = claw_session_mgr_load_mapping_locked(key, map);
+        err = key ? claw_session_mgr_load_mapping_locked(key, map) : ESP_ERR_INVALID_RESPONSE;
         cJSON_Delete(json);
         if (err == ESP_OK) err = visit(map, ctx);
+        // A damaged legacy map must not hide healthy sessions or change saved history.
+        if (err == ESP_ERR_INVALID_RESPONSE) {
+            ESP_LOGW(TAG, "Skipping an invalid chat mapping");
+            err = ESP_OK;
+        }
     }
     if (dir) closedir(dir);
     xSemaphoreGiveRecursive(s_session_mgr.mutex);

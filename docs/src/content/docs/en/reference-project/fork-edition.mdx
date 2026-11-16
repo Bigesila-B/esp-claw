@@ -10,7 +10,7 @@ This fork ships on `feature/context-compaction` and is based on upstream [`a4edf
 | Feature | Upstream baseline | Fork edition |
 | --- | --- | --- |
 | Enhancements entry | The sidebar provides device settings and chat | Enhancements brings together MCP Settings, Skills, commands, image chat, and session settings. |
-| Chat help | Individual commands provide their own help | The Commands page and `/help` in chat show active commands, Chinese descriptions, the date, CPU and memory use, today's and this month's token counts, and the LAN address. `/help` in chat also shows context usage for the active session. The `/session` and `/llm` menus, status, results, and argument prompts also appear in Chinese in chat. |
+| Chat help | Individual commands provide their own help | The Commands page and `/help` in chat show available chat commands, Chinese descriptions, the date, CPU and memory use, today's and this month's token counts, and the LAN address. `/help` in chat also shows context usage for the active session. Manage model connections in the Web Model Settings page. |
 | Reply notice | The default route sends “🦞 ESP-Claw is snapping on it...”, and build settings control tool-call progress | The rules used on a fresh setup omit the fixed notice. Web settings can turn tool-call progress on or off at runtime, with progress off by default. |
 | MCP | MCP Client and Server capabilities are available | MCP Settings saves up to four named servers with individual connection tests. Supported image jobs send their results back to the original chat. |
 | Skills | Skills and Lua scripts are available | Upload Skills from the Web Skills page and see loaded Skills and their unavailable tool groups. Optional MicroPython runs small Python scripts on ESP32-S3 boards with PSRAM. |
@@ -19,9 +19,10 @@ This fork ships on `feature/context-compaction` and is based on upstream [`a4edf
 | Hosted stickers | Chat platforms provide image-sending tools | `/sticker` looks up and sends a sticker on the device. The device handles links and uses zero model tokens. |
 | Web loading | The device serves the compressed page embedded in the firmware | Serves the full gzip asset so a dropped trailing byte cannot make the page fail to load. |
 | Session memory | Compaction starts at a session file size threshold | A context window setting adds a model-dependent compaction threshold. Compaction prioritizes recent turns and tries to summarize older content. |
+| Chat recovery | A model failure can surface as a raw error code | Chat shows Chinese messages for timeouts, rate limits, and insufficient space. Send `/retry` to retrieve the last saved answer or retry the last text question in the current conversation. |
 | Full storage | A failed session index rebuild can interrupt a reply | If history is unreadable and the index cannot be rebuilt, the device attempts the current reply. Uploads report low storage, and a Skill activation interrupted by full storage can recover after space is freed. |
 
-As of November 14, 2026, upstream `master` is [`50072775`](https://github.com/espressif/esp-claw/commit/50072775cfa20d7ce25a9b27591d9d7c8b9dbab5) and includes persistent web chat history. This fork uses an earlier baseline. Refreshing Web Chat clears the messages on the page, while the device stores the model's session memory separately.
+This fork includes upstream Web conversation history. Refresh to restore chat records saved on the device. Use the sidebar to switch conversations and load older messages by page. [Upstream implementation](https://github.com/espressif/esp-claw/commit/9354591b845371904d043dd4f7258e5f6ee69f61)
 
 ## Usage
 
@@ -30,11 +31,12 @@ As of November 14, 2026, upstream `master` is [`50072775`](https://github.com/es
 | Command | Action |
 |---------|--------|
 | `/help` | List commands and show the device date, LAN address, CPU, memory, token counts, and estimated chat context usage |
+| `/retry` | Retrieve the saved answer from the current conversation, or retry the last text question after a failure |
 | `/sticker [name]` | List hosted stickers or send the selected sticker |
 | `/mcp models [offset]` | Read the default MCP server's advertised model catalogue. Paged catalogues accept a starting offset |
 | `/mcp last-image` | Resend a recent MCP-generated image from the original chat |
 
-The upstream `/session` and `/llm` menus and replies have Simplified Chinese translations in this fork.
+The upstream `/session` menu and replies have Simplified Chinese translations in this fork.
 
 - **Commands and usage.** Open Enhancements → Chat Commands or send `/help` in chat. Web Chat uses the device icon in the help header. The device handles help locally, with zero model tokens. `/help` estimates context tokens from the active session's history and summary and shows the context window and percentage used. Daily and monthly totals come from the model API and are counted from activation onward in the device's time zone. Use the displayed IP address to open the settings page on the LAN.
 - **Remove the fixed notice on an existing device.** An upgrade keeps existing routes. If the lobster notice still appears, run `auto rules` in the device's serial console, confirm the rule exists, and run `auto delete_rule im_any_message_working_reply`.

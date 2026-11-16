@@ -31,8 +31,45 @@ void claw_core_set_tool_progress_enabled(bool enabled)
     atomic_store(&s_tool_progress_enabled, enabled);
 }
 
+const char *claw_core_chat_error(const char *detail)
+{
+    if (!detail) detail = "";
+    if (strstr(detail, "storage is full") || strstr(detail, "ENOSPC")) {
+        return "设备存储已满。请在网页「文件管理」释放空间，再重新发送问题。";
+    }
+    if (strncmp(detail, "HTTP ", 5) == 0) {
+        int status = atoi(detail + 5);
+        if (status == 429) return "模型 API 请求过多。请稍等片刻，再发送 /retry。";
+        if (status == 401 || status == 403 || status == 402) return "模型 API 拒绝了请求。请检查密钥和账户额度。";
+        if (status == 404) return "找不到配置的模型或 API 地址。请检查模型设置。";
+        if (status >= 500) return "模型服务暂时不可用。请稍后发送 /retry。";
+    }
+    if (strstr(detail, "TIMEOUT") || strstr(detail, "timed out")) {
+        return "等待模型回复超时。请稍后发送 /retry。";
+    }
+    if (strstr(detail, "ESP_ERR_HTTP_CONNECT") || strstr(detail, "ESP_ERR_HTTP_FETCH_HEADER")) {
+        return "连接模型服务失败。请检查网络，再发送 /retry。";
+    }
+    if (strstr(detail, "NO_MEM") || strstr(detail, "Out of memory")) {
+        return "设备可用内存不足。请稍后发送 /retry。";
+    }
+    if (strcmp(detail, "request cancelled") == 0) return "本次回复已取消。";
+    if (strcmp(detail, "Text retry cannot execute tools") == 0) {
+        return "这条问题需要调用工具。请查看原任务状态，或重新发送一条指令。";
+    }
+    return "本次聊天未完成。请发送 /retry 重试上一条文字问题。";
+}
+
+const char *claw_core_failure_note_reason(const char *text)
+{
+    static const char prefix[] = "Session note: the previous request failed before producing a final answer.\nReason: ";
+    return text && strncmp(text, prefix, sizeof(prefix) - 1) == 0 ? text + sizeof(prefix) - 1 : NULL;
+}
+
 static esp_err_t build_response_payload_json(const claw_core_request_t *request,
                                              const claw_core_response_t *response,
+                                             const char *error_text,
+                                             bool persisted,
                                              char **out_payload_json)
 {
     cJSON *root = NULL;
@@ -55,8 +92,9 @@ static esp_err_t build_response_payload_json(const claw_core_request_t *request,
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
-    if (response->error_message && response->error_message[0] &&
-            !cJSON_AddStringToObject(root, "error_message", response->error_message)) {
+    if ((request->session_id && !cJSON_AddStringToObject(root, "session_id", request->session_id)) ||
+            (persisted && !cJSON_AddBoolToObject(root, "persisted", true)) ||
+            (error_text && !cJSON_AddStringToObject(root, "error_message", error_text))) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
@@ -102,6 +140,7 @@ static esp_err_t build_out_message_event_common(const char *event_id_prefix,
 
 static esp_err_t build_agent_out_message_event(const claw_core_request_t *request,
                                                const claw_core_response_t *response,
+                                               bool persisted,
                                                claw_event_t *out_event,
                                                char **out_payload_json)
 {
@@ -117,13 +156,14 @@ static esp_err_t build_agent_out_message_event(const claw_core_request_t *reques
 
     *out_payload_json = NULL;
 
-    text = (response->status == CLAW_CORE_RESPONSE_STATUS_OK) ?
-           response->text : response->error_message;
+    const char *error_text = response->status == CLAW_CORE_RESPONSE_STATUS_ERROR ?
+                             claw_core_chat_error(response->error_message) : NULL;
+    text = error_text ? error_text : response->text;
     if (!text || !text[0]) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = build_response_payload_json(request, response, out_payload_json);
+    err = build_response_payload_json(request, response, error_text, persisted, out_payload_json);
     if (err != ESP_OK) {
         return err;
     }
@@ -155,6 +195,11 @@ static esp_err_t build_agent_out_message_event(const claw_core_request_t *reques
         strlcpy(out_event->correlation_id,
                 request->source_message_id,
                 sizeof(out_event->correlation_id));
+        if (request->source_channel && strcmp(request->source_channel, "qq") == 0 &&
+                strcmp(channel, request->source_channel) == 0 && request->source_chat_id &&
+                strcmp(chat_id, request->source_chat_id) == 0) {
+            out_event->reply_to_message_id = (char *)request->source_message_id;
+        }
     } else {
         snprintf(out_event->correlation_id, sizeof(out_event->correlation_id),
                  "%" PRIu32,
@@ -166,7 +211,8 @@ static esp_err_t build_agent_out_message_event(const claw_core_request_t *reques
 }
 
 void claw_core_publish_out_message_if_requested(const claw_core_request_item_t *request,
-                                                const claw_core_response_item_t *response)
+                                                const claw_core_response_item_t *response,
+                                                bool persisted)
 {
     claw_event_t event = {0};
     char *payload_json = NULL;
@@ -179,6 +225,7 @@ void claw_core_publish_out_message_if_requested(const claw_core_request_item_t *
 
     err = build_agent_out_message_event(&request->view,
                                         &response->view,
+                                        persisted,
                                         &event,
                                         &payload_json);
     if (err == ESP_OK) {

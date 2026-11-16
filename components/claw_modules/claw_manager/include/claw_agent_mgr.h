@@ -45,6 +45,7 @@ typedef struct {
 } claw_agent_mgr_config_t;
 
 typedef struct {
+    const char *session_id; /* Validated explicit session; independent of the entry channel. */
     claw_session_policy_t session_policy;
     const char *user_text;
     const char *source_cap;
@@ -85,6 +86,12 @@ esp_err_t claw_agent_mgr_submit_root_text(const char *text,
 esp_err_t claw_agent_mgr_receive_root_for(uint32_t request_id,
                                           claw_core_response_t *response,
                                           uint32_t timeout_ms);
+/* Submit for a specific session selected in the Web UI. */
+esp_err_t claw_agent_mgr_post_session_message(const char *id, const char *text,
+                                               const char *message_id, bool reply_to_source,
+                                               uint32_t *out_request_id);
+esp_err_t claw_agent_mgr_delete_session(const char *id);
+const char *claw_agent_mgr_session_state(const char *session_id);
 
 esp_err_t claw_agent_mgr_spawn_subagent(const claw_cap_call_context_t *parent_ctx,
                                         const char *prompt,

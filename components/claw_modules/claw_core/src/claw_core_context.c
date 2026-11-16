@@ -673,8 +673,10 @@ esp_err_t claw_core_build_iteration_context(claw_core_state_t *core,
         }
     }
 
-    *out_tools_json = cJSON_GetArraySize(tools) > 0 ? cJSON_PrintUnformatted(tools) : NULL;
-    if (cJSON_GetArraySize(tools) > 0 && !*out_tools_json) {
+    bool include_tools = !(request->view.flags & CLAW_CORE_REQUEST_FLAG_TEXT_RETRY) &&
+                         cJSON_GetArraySize(tools) > 0;
+    *out_tools_json = include_tools ? cJSON_PrintUnformatted(tools) : NULL;
+    if (include_tools && !*out_tools_json) {
         err = ESP_ERR_NO_MEM;
         goto cleanup;
     }

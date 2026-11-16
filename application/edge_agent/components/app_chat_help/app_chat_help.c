@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "claw_cap.h"
+#include "claw_agent_mgr.h"
 #include "claw_event_router.h"
 #include "claw_paths.h"
 #include "esp_log.h"
@@ -28,6 +29,7 @@
 #include "token_usage.h"
 
 #define HELP_COMMAND       "/help"
+#define RETRY_COMMAND      "/retry"
 #define HELP_REPLY_TITLE   "ESP-Claw /help\n"
 #define HELP_PAGE_SIZE     1400
 #define HELP_CAP_USAGE_SIZE 2048
@@ -90,8 +92,9 @@ static bool rule_available(const claw_event_router_rule_t *rule, const claw_even
     }
     for (size_t i = 0; i < rule->action_count; ++i) {
         const claw_event_router_action_t *action = &rule->actions[i];
-        if (action->kind == CLAW_EVENT_ROUTER_ACTION_CALL_CAP && !action->fail_open &&
-                !command_cap_ready(action->cap)) {
+        if (action->kind == CLAW_EVENT_ROUTER_ACTION_CALL_CAP &&
+                (strcmp(action->cap, "llm_config_command") == 0 ||
+                 (!action->fail_open && !command_cap_ready(action->cap)))) {
             return false;
         }
     }
@@ -177,6 +180,15 @@ static void visit_commands(const claw_event_t *event, help_command_visitor_t vis
     }, ctx)) {
         return;
     }
+#if CONFIG_APP_CLAW_CAP_MEMORY
+    if (!visit(&(help_command_t) {
+        .command = RETRY_COMMAND,
+        .description = "Recover the last answer or retry the last text question",
+        .description_zh = "找回上一条回复，或重试上一条文字问题",
+    }, ctx)) {
+        return;
+    }
+#endif
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
     if (command_cap_ready("mcp_last_image") && !visit(&(help_command_t) {
         .command = MCP_LAST_IMAGE_COMMAND,
@@ -200,8 +212,7 @@ static void visit_commands(const claw_event_t *event, help_command_visitor_t vis
         const claw_event_router_action_t *first = rule->actions;
         if (rule->action_count && first->kind == CLAW_EVENT_ROUTER_ACTION_CALL_CAP &&
                 rule->match.text_match_rule == CLAW_EVENT_ROUTER_TEXT_MATCH_PREFIX &&
-                ((strcmp(rule->match.text, "/session") == 0 && strcmp(first->cap, "session_command") == 0) ||
-                 (strcmp(rule->match.text, "/llm") == 0 && strcmp(first->cap, "llm_config_command") == 0)) &&
+                strcmp(rule->match.text, "/session") == 0 && strcmp(first->cap, "session_command") == 0 &&
                 visit_cap_usage(first->cap, rule->match.text, rule->match.channel, !event, visit, ctx)) {
             continue;
         }
@@ -436,12 +447,24 @@ static void append_usage(help_text_t *out, const char *label, const app_token_pe
     append_help(out, "\n");
 }
 
-static void append_context_usage(help_text_t *out)
-{
 #if CONFIG_APP_CLAW_CAP_MEMORY
-    const claw_event_t *event = out->event;
+static esp_err_t resolve_chat_session(const claw_event_t *event, char *session_id)
+{
+    if (strcmp(event->source_channel, "web") == 0 && strcmp(event->source_cap, "web_chat") == 0 &&
+            strlen(event->chat_id) == CLAW_SESSION_PUBLIC_ID_SIZE - 1) {
+        claw_session_info_t *info = calloc(1, sizeof(*info));
+        if (!info) {
+            return ESP_ERR_NO_MEM;
+        }
+        esp_err_t err = claw_session_mgr_catalog_get(event->chat_id, info);
+        if (err == ESP_OK) {
+            strlcpy(session_id, info->session_id, CLAW_SESSION_MGR_ID_SIZE);
+        }
+        free(info);
+        return err;
+    }
     const claw_session_build_context_t session = {
-        .session_policy = event->session_policy,
+        .session_policy = CLAW_SESSION_POLICY_CHAT,
         .source_cap = event->source_cap,
         .event_type = event->event_type,
         .source_channel = event->source_channel,
@@ -449,10 +472,77 @@ static void append_context_usage(help_text_t *out)
         .message_id = event->message_id,
         .event_id = event->event_id,
     };
+    return claw_session_mgr_peek_session_id(&session, session_id, CLAW_SESSION_MGR_ID_SIZE);
+}
+
+static esp_err_t retry_last_text(const claw_event_t *event)
+{
+    char *session_id = malloc(CLAW_SESSION_MGR_ID_SIZE);
+    cJSON *page = NULL;
+    const char *notice = "读取上一轮失败。请检查设备存储后重试。";
+    esp_err_t err = session_id ? resolve_chat_session(event, session_id) : ESP_ERR_NO_MEM;
+    if (err == ESP_OK && strcmp(claw_agent_mgr_session_state(session_id), "idle") != 0) {
+        notice = "当前会话正在处理消息，请等这轮结束后再重试。";
+        goto finish;
+    }
+    if (err != ESP_OK || claw_memory_read_session_messages(session_id, 0, 2, &page) != ESP_OK) {
+        goto finish;
+    }
+
+    const cJSON *messages = cJSON_GetObjectItem(page, "messages");
+    int index = cJSON_GetArraySize(messages) - 1;
+    const cJSON *last = cJSON_GetArrayItem(messages, index);
+    const char *role = cJSON_GetStringValue(cJSON_GetObjectItem(last, "role"));
+    if (role && strcmp(role, "assistant") == 0) {
+        const char *answer = cJSON_GetStringValue(cJSON_GetObjectItem(last, "text"));
+        if (answer && answer[0] && !cJSON_IsTrue(cJSON_GetObjectItem(last, "error"))) {
+            notice = answer;
+            goto finish;
+        }
+        last = cJSON_GetArrayItem(messages, --index);
+    }
+    role = cJSON_GetStringValue(cJSON_GetObjectItem(last, "role"));
+    const char *text = cJSON_GetStringValue(cJSON_GetObjectItem(last, "text"));
+    if (!role || strcmp(role, "user") != 0 || !text || !text[0]) {
+        notice = "当前会话没有可重试的文字问题。请先发送一条消息。";
+        goto finish;
+    }
+    if (strstr(text, "/inbox/") || strstr(text, "/files/")) {
+        notice = "上一条消息包含附件。请重新发送文字和附件。";
+        goto finish;
+    }
+    const claw_agent_mgr_root_input_t input = {
+        .session_id = session_id,
+        .session_policy = CLAW_SESSION_POLICY_CHAT,
+        .user_text = text,
+        .source_cap = event->source_cap,
+        .source_channel = event->source_channel,
+        .source_chat_id = event->chat_id,
+        .source_sender_id = event->sender_id,
+        .source_message_id = event->reply_to_message_id ? event->reply_to_message_id : event->message_id,
+        .target_channel = event->source_channel,
+        .target_chat_id = event->chat_id,
+        .flags = CLAW_CORE_REQUEST_FLAG_PUBLISH_OUT_MESSAGE | CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE |
+                 CLAW_CORE_REQUEST_FLAG_TEXT_RETRY,
+    };
+    err = claw_agent_mgr_submit_root(&input, 0);
+    notice = err == ESP_OK ? NULL : "会话暂时无法重试。请稍后再发 /retry。";
+
+finish:
+    err = notice ? claw_event_router_reply(event, notice) : ESP_OK;
+    cJSON_Delete(page);
+    free(session_id);
+    return err;
+}
+#endif
+
+static void append_context_usage(help_text_t *out)
+{
+#if CONFIG_APP_CLAW_CAP_MEMORY
     claw_memory_session_usage_t usage;
     char *session_id = malloc(CLAW_SESSION_MGR_ID_SIZE);
     if (session_id) {
-        bool available = claw_session_mgr_peek_session_id(&session, session_id, CLAW_SESSION_MGR_ID_SIZE) == ESP_OK &&
+        bool available = resolve_chat_session(out->event, session_id) == ESP_OK &&
                          claw_memory_get_session_usage(session_id, &usage) == ESP_OK;
         free(session_id);
         if (available) {
@@ -576,6 +666,13 @@ static bool handle_chat_command(const claw_event_t *event, esp_err_t *out_status
     while (isspace((unsigned char)*text)) {
         ++text;
     }
+#if CONFIG_APP_CLAW_CAP_MEMORY
+    if (trimmed_length(text) == sizeof(RETRY_COMMAND) - 1 &&
+            strncmp(text, RETRY_COMMAND, sizeof(RETRY_COMMAND) - 1) == 0) {
+        *out_status = retry_last_text(event);
+        return true;
+    }
+#endif
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
     size_t image_command_len = sizeof(MCP_LAST_IMAGE_COMMAND) - 1;
     if (trimmed_length(text) == image_command_len &&

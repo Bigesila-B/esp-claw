@@ -110,13 +110,13 @@ bool claw_core_llm_config_ready(claw_core_state_t *core,
         xSemaphoreTake(core->llm_lock, portMAX_DELAY);
     }
     if (!core->llm_config.api_key || !core->llm_config.api_key[0]) {
-        reason = "LLM API token is not configured. Open the device settings page and set the LLM API token before chatting.";
+        reason = "请先在网页「模型设置」填写 API 密钥。";
     } else if (!core->llm_config.backend_type || !core->llm_config.backend_type[0]) {
-        reason = "LLM backend is not configured. Open the device settings page and select an LLM backend before chatting.";
+        reason = "请先在网页「模型设置」选择 API 类型。";
     } else if (!core->llm_config.model || !core->llm_config.model[0]) {
-        reason = "LLM model is not configured. Open the device settings page and set an LLM model before chatting.";
+        reason = "请先在网页「模型设置」填写模型名称。";
     } else if (!core->llm_config.base_url || !core->llm_config.base_url[0]) {
-        reason = "LLM base URL is not configured. Open the device settings page and set the LLM base URL before chatting.";
+        reason = "请先在网页「模型设置」填写 API 地址。";
     } else {
         ready = true;
     }

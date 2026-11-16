@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "claw_core.h"
+#include "cJSON.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -93,6 +94,9 @@ esp_err_t claw_memory_delete_session_history(const char *session_id,
 
 /* Estimate persisted session history and its summary with the active context window. */
 esp_err_t claw_memory_get_session_usage(const char *session_id, claw_memory_session_usage_t *out);
+/* Read visible messages by ordinal. A zero cursor selects the newest page. */
+esp_err_t claw_memory_read_session_messages(const char *session_id, size_t before,
+                                             size_t limit, cJSON **out);
 esp_err_t claw_memory_request_gate_callback(const claw_core_request_t *request,
                                             char *reject_message,
                                             size_t reject_message_size,

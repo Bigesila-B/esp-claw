@@ -1788,7 +1788,7 @@ static esp_err_t claw_event_router_execute_agent_action(
     agent_input.source_channel = event->source_channel;
     agent_input.source_chat_id = event->chat_id;
     agent_input.source_sender_id = event->sender_id;
-    agent_input.source_message_id = event->message_id;
+    agent_input.source_message_id = event->reply_to_message_id ? event->reply_to_message_id : event->message_id;
     agent_input.event_id = event->event_id;
     agent_input.target_channel = (target_channel && target_channel[0]) ? target_channel : event->source_channel;
     agent_input.target_chat_id = (target_chat_id && target_chat_id[0]) ? target_chat_id : event->chat_id;
@@ -1806,6 +1806,9 @@ static esp_err_t claw_event_router_execute_agent_action(
     } else {
         claw_event_router_update_last_output(ctx, "agent", agent_input.target_channel, "error",
                                              esp_err_to_name(err));
+        if (strcmp(event->event_type, "message") == 0) {
+            (void)claw_event_router_reply(event, "机器人暂时无法接收新请求。请稍后重新发送这条消息。");
+        }
     }
 
     if (result) {
@@ -1835,12 +1838,26 @@ static esp_err_t claw_event_router_send_text(const claw_event_t *event,
     if (err != ESP_OK) {
         return err;
     }
+    bool same_chat = strcmp(channel, event->source_channel) == 0 && strcmp(chat_id, event->chat_id) == 0;
+    bool web = strcmp(channel, "web") == 0;
+    if (web && same_chat && strcmp(event->source_cap, "web_chat") == 0 && event->target_endpoint[0]) {
+        chat_id = event->target_endpoint;
+    }
     cJSON *root = cJSON_CreateObject();
     if (!root || !cJSON_AddStringToObject(root, "chat_id", chat_id) ||
             !cJSON_AddStringToObject(root, "message", message) ||
             !cJSON_AddStringToObject(root, "event_type", event->event_type)) {
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
+    }
+    if (web && strcmp(event->event_type, "out_message") == 0 && event->payload_json) {
+        cJSON *metadata = cJSON_Parse(event->payload_json);
+        bool persisted = cJSON_IsTrue(cJSON_GetObjectItem(metadata, "persisted"));
+        cJSON_Delete(metadata);
+        if (persisted && !cJSON_AddBoolToObject(root, "persisted", true)) {
+            cJSON_Delete(root);
+            return ESP_ERR_NO_MEM;
+        }
     }
     char *payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1853,6 +1870,7 @@ static esp_err_t claw_event_router_send_text(const claw_event_t *event,
         .target_channel = channel,
         .target_chat_id = chat_id,
         .source_cap = "claw_event_router",
+        .correlation_id = same_chat ? event->reply_to_message_id : NULL,
         .caller = CLAW_CAP_CALLER_SYSTEM,
     };
     err = claw_cap_call(cap_name, payload, &ctx, output, output_size);
@@ -2075,8 +2093,15 @@ static esp_err_t claw_event_router_execute_action(const claw_event_router_rule_t
         return claw_event_router_execute_agent_action(rule, action, event, ctx, result);
     case CLAW_EVENT_ROUTER_ACTION_RUN_SCRIPT:
         return claw_event_router_execute_script_action(rule, action, event, ctx, result);
-    case CLAW_EVENT_ROUTER_ACTION_SEND_MESSAGE:
-        return claw_event_router_execute_send_message_action(rule, action, event, ctx, result);
+    case CLAW_EVENT_ROUTER_ACTION_SEND_MESSAGE: {
+        cJSON *metadata = strcmp(event->event_type, "out_message") == 0 && event->payload_json ? cJSON_Parse(event->payload_json) : NULL;
+        const char *session_id = cJSON_GetStringValue(cJSON_GetObjectItem(metadata, "session_id"));
+        if (session_id) (void)claw_session_mgr_set_delivery(session_id, "pending");
+        esp_err_t err = claw_event_router_execute_send_message_action(rule, action, event, ctx, result);
+        if (session_id) (void)claw_session_mgr_set_delivery(session_id, err == ESP_OK ? "submitted" : "failed");
+        cJSON_Delete(metadata);
+        return err;
+    }
     case CLAW_EVENT_ROUTER_ACTION_EMIT_EVENT:
         return claw_event_router_execute_emit_event_action(action, ctx, result);
     case CLAW_EVENT_ROUTER_ACTION_DROP:
@@ -2148,11 +2173,8 @@ static esp_err_t claw_event_router_process_event(const claw_event_t *event,
 
     if (event->text && strcmp(event->event_type, "message") == 0 &&
             strcmp(event->content_type, "text") == 0) {
-        claw_event_router_lock();
-        claw_event_router_chat_command_fn handler = s_runtime->chat_command_handler;
-        claw_event_router_unlock();
         esp_err_t err = ESP_OK;
-        if (handler && handler(event, &err)) {
+        if (claw_event_router_try_chat_command(event, &err)) {
             local.matched = true;
             local.matched_rules = 1;
             local.action_count = 1;
@@ -2592,6 +2614,9 @@ esp_err_t claw_event_router_publish_message(const char *source_cap,
     if (message_id) {
         strlcpy(event.message_id, message_id, sizeof(event.message_id));
         strlcpy(event.correlation_id, message_id, sizeof(event.correlation_id));
+        if (strcmp(channel, "qq") == 0) {
+            event.reply_to_message_id = (char *)message_id;
+        }
     }
     event.timestamp_ms = claw_event_router_now_ms();
     event.session_policy = CLAW_SESSION_POLICY_CHAT;
@@ -2665,6 +2690,17 @@ esp_err_t claw_event_router_set_chat_command_handler(claw_event_router_chat_comm
     s_runtime->chat_command_handler = handler;
     claw_event_router_unlock();
     return ESP_OK;
+}
+
+bool claw_event_router_try_chat_command(const claw_event_t *event, esp_err_t *out_status)
+{
+    if (!s_runtime || !s_runtime->initialized || !event || !event->text || !out_status) {
+        return false;
+    }
+    claw_event_router_lock();
+    claw_event_router_chat_command_fn handler = s_runtime->chat_command_handler;
+    claw_event_router_unlock();
+    return handler && handler(event, out_status);
 }
 
 esp_err_t claw_event_router_handle_event(const claw_event_t *event,
@@ -3002,4 +3038,16 @@ esp_err_t claw_event_router_get_last_result(claw_event_router_result_t *out_resu
     *out_result = s_runtime->last_result;
     claw_event_router_unlock();
     return ESP_OK;
+}
+
+bool claw_event_router_channel_is_bound(const char *channel)
+{
+    if (!channel || !s_runtime || !s_runtime->initialized) return false;
+    bool found = false;
+    claw_event_router_lock();
+    for (size_t i = 0; i < s_runtime->binding_count; i++) {
+        if (strcmp(channel, s_runtime->bindings[i].channel) == 0) { found = true; break; }
+    }
+    claw_event_router_unlock();
+    return found;
 }

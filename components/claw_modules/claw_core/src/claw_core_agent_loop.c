@@ -117,6 +117,8 @@ void claw_core_agent_loop_task(void *arg)
         char obs_tool_calls_csv[CLAW_CORE_OBS_CSV_MAX] = {0};
         bool original_user_persisted = false;
         bool inject_active_user = true;
+        bool final_persisted = false;
+        bool storage_full = false;
 
         if (xQueueReceive(core->request_queue, &request, portMAX_DELAY) != pdTRUE) {
             continue;
@@ -195,7 +197,7 @@ void claw_core_agent_loop_task(void *arg)
                 goto finish_request;
             }
         }
-        if (core->on_request_start) {
+        if (core->on_request_start && !(request.view.flags & CLAW_CORE_REQUEST_FLAG_TEXT_RETRY)) {
             err = core->on_request_start(&request.view, core->on_request_start_user_ctx);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG,
@@ -213,6 +215,7 @@ void claw_core_agent_loop_task(void *arg)
                                         user_texts,
                                         1,
                                         &original_user_persisted);
+            storage_full = persist_err == CLAW_CORE_ERR_STORAGE_FULL;
 
             claw_core_log_context_persist_failure(&request.view,
                                                   "persist_context_user",
@@ -338,6 +341,11 @@ void claw_core_agent_loop_task(void *arg)
                 err = ESP_OK;
                 break;
             }
+            if (request.view.flags & CLAW_CORE_REQUEST_FLAG_TEXT_RETRY) {
+                err = ESP_ERR_NOT_SUPPORTED;
+                response.view.error_message = claw_utils_string_dup("Text retry cannot execute tools");
+                goto finish_request;
+            }
 
             claw_core_control_set_phase(core, CLAW_CORE_AGENT_LOOP_PHASE_AFTER_LLM_BEFORE_TOOL);
             {
@@ -422,17 +430,29 @@ void claw_core_agent_loop_task(void *arg)
             cJSON *reply_images = core->reply_images;
             core->reply_images = NULL;
             xSemaphoreGive(core->inflight_lock);
+            const char *final_json = cJSON_GetArraySize(reply_images) ? NULL : llm_response.raw_message_json;
             claw_core_append_reply_images(reply_images, &response.view.text);
             cJSON_Delete(reply_images);
 
             response.view.status = CLAW_CORE_RESPONSE_STATUS_OK;
             persist_err = claw_core_persist_context_final_if_configured(core,
                                                                         &request.view,
-                                                                        llm_response.raw_message_json,
+                                                                        final_json,
                                                                         response.view.text);
             claw_core_log_context_persist_failure(&request.view,
                                                   "persist_context_final",
                                                   persist_err);
+            final_persisted = persist_err == ESP_OK && core->persist_context && request.view.session_id;
+            storage_full = storage_full || persist_err == CLAW_CORE_ERR_STORAGE_FULL;
+            if (storage_full) {
+                char *reply = claw_utils_string_dup_printf("%s\n\n设备存储已满，本轮可能未保存。请在网页「文件管理」释放空间。",
+                                                           response.view.text);
+                if (reply) {
+                    free(response.view.text);
+                    response.view.text = reply;
+                    final_persisted = false;
+                }
+            }
             if (core->completion_observer_count > 0) {
                 claw_core_completion_summary_t summary = {
                     .request_id = request.view.request_id,
@@ -451,6 +471,11 @@ void claw_core_agent_loop_task(void *arg)
         }
 
 finish_request:
+        if (response.view.status == CLAW_CORE_RESPONSE_STATUS_ERROR && storage_full &&
+                !original_user_persisted) {
+            free(response.view.error_message);
+            response.view.error_message = claw_utils_string_dup("storage is full");
+        }
         claw_core_control_set_phase(core, CLAW_CORE_AGENT_LOOP_PHASE_FINALIZING);
         if (xSemaphoreTake(core->inflight_lock, portMAX_DELAY) == pdTRUE) {
             bool was_cancelled = core->inflight_abort &&
@@ -476,7 +501,7 @@ finish_request:
             ESP_LOGE(TAG, "request=%" PRIu32 " failed: %s",
                      request.view.request_id,
                      response.view.error_message ? response.view.error_message : esp_err_to_name(err));
-            if (core->persist_context &&
+            if (original_user_persisted && core->persist_context &&
                     request.view.session_id && request.view.session_id[0] &&
                     request.view.user_text && request.view.user_text[0]) {
                 esp_err_t persist_err;
@@ -494,11 +519,12 @@ finish_request:
                     claw_core_log_context_persist_failure(&request.view,
                                                           "persist_context_failure_note",
                                                           persist_err);
+                    final_persisted = persist_err == ESP_OK;
                     free(failure_trace);
                 }
             }
         }
-        claw_core_publish_out_message_if_requested(&request, &response);
+        claw_core_publish_out_message_if_requested(&request, &response, final_persisted);
         if (request.view.flags & CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE) {
             claw_core_free_response_item(&response);
         } else if (claw_core_response_push(core, &response) != ESP_OK) {

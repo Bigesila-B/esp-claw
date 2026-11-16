@@ -40,10 +40,17 @@ typedef enum {
 #define CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE (1U << 1)
 #define CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT      (1U << 2)
 #define CLAW_CORE_REQUEST_FLAG_PUBLISH_STAGE_MESSAGE  (1U << 3)
+#define CLAW_CORE_REQUEST_FLAG_TEXT_RETRY            (1U << 4)
+
+#define CLAW_CORE_ERR_STORAGE_FULL 0xca01
 
 #define CLAW_CORE_CONTEXT_PROVIDER_FLAG_REQUEST_START_ONLY (1U << 0)
 
 typedef struct claw_core_state *claw_core_handle_t;
+
+/* Present model errors without forwarding raw provider responses to chat. */
+const char *claw_core_chat_error(const char *detail);
+const char *claw_core_failure_note_reason(const char *text);
 
 /** Attach an image to the active request's final reply from a tool callback. */
 esp_err_t claw_core_add_reply_image(claw_core_handle_t core, uint32_t request_id, const char *url);
@@ -201,6 +208,8 @@ esp_err_t claw_core_publish_stage_text(const claw_core_request_t *request, const
 esp_err_t claw_core_submit(claw_core_handle_t core,
                            const claw_core_request_t *request,
                            uint32_t timeout_ms);
+/* Returns idle, queued or running for an existing session. */
+const char *claw_core_session_state(claw_core_handle_t core, const char *session_id);
 esp_err_t claw_core_cancel_request(claw_core_handle_t core, uint32_t request_id);
 claw_core_agent_loop_phase_t claw_core_get_agent_loop_phase(claw_core_handle_t core);
 esp_err_t claw_core_receive(claw_core_handle_t core,

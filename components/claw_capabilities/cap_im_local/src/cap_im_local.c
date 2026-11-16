@@ -133,7 +133,8 @@ static esp_err_t cap_im_local_send_text_impl(const char *channel,
                                              const char *message_id,
                                              const char *text,
                                              const char *link_url,
-                                             const char *link_label)
+                                             const char *link_label,
+                                             bool persisted)
 {
     cap_im_local_message_t message = {0};
     cap_im_local_outbound_callback_t callback = NULL;
@@ -163,6 +164,7 @@ static esp_err_t cap_im_local_send_text_impl(const char *channel,
     message.channel = (channel && channel[0]) ? channel : s_local.default_channel;
     message.chat_id = chat_id;
     message.text = text;
+    message.persisted = persisted;
     message.timestamp_ms = cap_im_local_now_ms();
     if (message_id && message_id[0]) {
         message.message_id = message_id;
@@ -254,7 +256,9 @@ static esp_err_t cap_im_local_send_message_execute(const char *input_json,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_local_send_text_with_link(channel, chat_id, message_id, message, link_url, link_label);
+    bool persisted = ctx && ctx->caller == CLAW_CAP_CALLER_SYSTEM &&
+                     cJSON_IsTrue(cJSON_GetObjectItem(root, "persisted"));
+    err = cap_im_local_send_text_impl(channel, chat_id, message_id, message, link_url, link_label, persisted);
     cJSON_Delete(root);
     if (err != ESP_OK) {
         snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
@@ -362,7 +366,7 @@ esp_err_t cap_im_local_send_text(const char *channel,
                                  const char *message_id,
                                  const char *text)
 {
-    return cap_im_local_send_text_impl(channel, chat_id, message_id, text, NULL, NULL);
+    return cap_im_local_send_text_impl(channel, chat_id, message_id, text, NULL, NULL, false);
 }
 
 esp_err_t cap_im_local_send_text_with_link(const char *channel,
@@ -372,7 +376,7 @@ esp_err_t cap_im_local_send_text_with_link(const char *channel,
                                            const char *link_url,
                                            const char *link_label)
 {
-    return cap_im_local_send_text_impl(channel, chat_id, message_id, text, link_url, link_label);
+    return cap_im_local_send_text_impl(channel, chat_id, message_id, text, link_url, link_label, false);
 }
 
 static const char *cap_im_local_basename(const char *path)

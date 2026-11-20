@@ -1,6 +1,7 @@
 import { createSignal, For, onCleanup, onMount, Show, type Component, type JSX } from 'solid-js';
 import { fetchChatHelp, type ChatHelpPeriod, type ChatHelpSnapshot } from '../api/client';
 import { TabShell } from '../components/layout/TabShell';
+import { ScheduleSettings } from '../components/ScheduleSettings';
 import { Banner } from '../components/ui/Banner';
 import { Button } from '../components/ui/Button';
 import { PageHeader } from '../components/ui/PageHeader';
@@ -32,6 +33,13 @@ const TokenCount: Component<{ period: ChatHelpPeriod; available: boolean }> = (p
       </span>
     </Show>
   </>
+);
+
+const CacheHit: Component<{ period: ChatHelpPeriod }> = (props) => (
+  <Show when={props.period.cache_input} fallback={t('commandUnknown')}>
+    {((100 * (props.period.cache_hit ?? 0)) / props.period.cache_input!).toFixed(1)}%
+    {' · '}{number(props.period.cache_hit ?? 0)} / {number(props.period.cache_input!)} token
+  </Show>
 );
 
 export const ChatHelpPage: Component = () => {
@@ -93,6 +101,8 @@ export const ChatHelpPage: Component = () => {
                 <Metric label={t('commandMonth')}>
                   <TokenCount period={data().month} available={data().usage_available} />
                 </Metric>
+                <Metric label={currentLocale() === 'zh-cn' ? '今日输入缓存命中率' : 'Input cache hit rate today'}><CacheHit period={data().today} /></Metric>
+                <Metric label={currentLocale() === 'zh-cn' ? '本月输入缓存命中率' : 'Input cache hit rate this month'}><CacheHit period={data().month} /></Metric>
                 <Metric label={t('commandAddress')}>
                   <Show when={data().ip} fallback={t('commandUnknown')}>
                     {(ip) => <a class="underline" href={'http://' + ip() + '/'}>{'http://' + ip() + '/'}</a>}
@@ -123,6 +133,7 @@ export const ChatHelpPage: Component = () => {
             </>
           )}
         </Show>
+        <ScheduleSettings />
       </div>
     </TabShell>
   );

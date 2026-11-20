@@ -23,6 +23,9 @@ static esp_err_t cap_mcp_format_request_error(esp_err_t err, char *output, size_
         snprintf(output, output_size, "Error: MCP server not found. Use mcp_list_servers to find saved names or configure a server in Web settings.");
     } else if (err == ESP_ERR_NOT_ALLOWED) {
         snprintf(output, output_size, "Error: The selected MCP server rejected authentication. Check its Bearer token in Web settings.");
+    } else if (err == ESP_ERR_INVALID_SIZE) {
+        snprintf(output, output_size, "Error: MCP response too large (ESP_ERR_INVALID_SIZE). "
+                 "For list_models, use a smaller page or the MCP model directory script.");
     } else {
         snprintf(output, output_size, "Error: MCP request failed (%s)", esp_err_to_name(err));
     }
@@ -69,6 +72,66 @@ static bool delivery_string(const cJSON *object, const char *key, const char **v
     return true;
 }
 
+/* Accept flat parameters from model providers that omit the arguments wrapper. */
+static esp_err_t normalize_tool_arguments(cJSON *input)
+{
+    if (!cJSON_IsObject(input)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const cJSON *arguments = cJSON_GetObjectItemCaseSensitive(input, "arguments");
+    if (arguments) {
+        return cJSON_IsObject(arguments) ? ESP_OK : ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *args = cJSON_CreateObject();
+    if (!args) {
+        return ESP_ERR_NO_MEM;
+    }
+    const cJSON *field;
+    cJSON_ArrayForEach(field, input) {
+        const char *key = field->string;
+        if (strcmp(key, "tool_name") == 0 || strcmp(key, "server") == 0 ||
+                strcmp(key, "server_url") == 0 || strcmp(key, "endpoint") == 0 ||
+                strcmp(key, "image_delivery") == 0 || strcmp(key, "bearer_token") == 0) {
+            continue;
+        }
+        if (!cJSON_AddItemReferenceToObject(args, key, (cJSON *)field)) {
+            cJSON_Delete(args);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (!cJSON_AddItemToObjectCS(input, "arguments", args)) {
+        cJSON_Delete(args);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static void append_image_model_hint(const cJSON *result, char *output, size_t size)
+{
+    size_t used = strnlen(output, size);
+    if (used >= size) {
+        return;
+    }
+    int written = snprintf(output + used, size - used, "\nFor generate_image, copy the exact model ID from list_models(kind=image).");
+    if (written < 0 || (size_t)written >= size - used) {
+        return;
+    }
+    used += (size_t)written;
+    const cJSON *id;
+    cJSON_ArrayForEach(id, cJSON_GetObjectItemCaseSensitive(result, "esp_claw_model_ids")) {
+        const char *value = cJSON_GetStringValue(id);
+        if (!value || !value[0] || strlen(value) > MCP_IMAGE_FIELD_MAX || strpbrk(value, "\r\n\t")) {
+            continue;
+        }
+        written = snprintf(output + used, size - used, "\n- model: %s", value);
+        if (written < 0 || (size_t)written >= size - used) {
+            break;
+        }
+        used += (size_t)written;
+    }
+}
+
 static esp_err_t cap_mcp_call_execute(const char *input_json,
                                       const claw_cap_call_context_t *ctx,
                                       char *output,
@@ -78,6 +141,12 @@ static esp_err_t cap_mcp_call_execute(const char *input_json,
     esp_err_t err;
 
     cJSON *input = cJSON_Parse(input_json);
+    err = normalize_tool_arguments(input);
+    if (err != ESP_OK) {
+        cJSON_Delete(input);
+        snprintf(output, output_size, "Error: MCP tool arguments must be a JSON object.");
+        return err;
+    }
     const char *name = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(input, "tool_name"));
     const cJSON *image = cJSON_GetObjectItemCaseSensitive(input, "image_delivery");
     bool common_image_tool = name && strcmp(name, "generate_image") == 0;
@@ -107,12 +176,17 @@ static esp_err_t cap_mcp_call_execute(const char *input_json,
         return cap_mcp_format_request_error(err, output, output_size);
     }
 
-    if (!options.delivery || !cap_mcp_deliver_image(input, result, &options, ctx, output, output_size)) {
+    bool failed = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(result, "isError")) ||
+                  cJSON_IsString(cJSON_GetObjectItemCaseSensitive(result, "error_message"));
+    if (failed || !options.delivery || !cap_mcp_deliver_image(input, result, &options, ctx, output, output_size)) {
         cap_mcp_format_result(result, ctx, output, output_size);
+    }
+    if (failed && common_image_tool) {
+        append_image_model_hint(result, output, output_size);
     }
     cJSON_Delete(result);
     cJSON_Delete(input);
-    return ESP_OK;
+    return failed ? ESP_ERR_INVALID_RESPONSE : ESP_OK;
 }
 
 static esp_err_t cap_mcp_last_image_execute(const char *input_json, const claw_cap_call_context_t *ctx,
@@ -308,7 +382,7 @@ static const claw_cap_descriptor_t s_mcp_client_descriptors[] = {
         .id = "mcp_call_tool",
         .name = "mcp_call_tool",
         .family = "mcp",
-        .description = "Call a tool on the named or default MCP server. For requested images set image_delivery to {} for a direct result, or map the server's read-only status tool and result fields for background delivery.",
+        .description = "Call a tool on the named or default MCP server. Put remote parameters inside arguments. Use tool schemas to verify parameters. Before generate_image, obtain the exact model ID from list_models if the user gave a display name. Use filters or small pages when declared. For requested images set image_delivery to {} for a direct result, or map the server's read-only status tool and result fields for background delivery.",
         .kind = CLAW_CAP_KIND_CALLABLE,
         .cap_flags = CLAW_CAP_FLAG_CALLABLE_BY_LLM,
         .input_schema_json =

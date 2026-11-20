@@ -319,7 +319,8 @@ esp_err_t claw_core_append_tool_results_messages(claw_core_state_t *core,
                                                  const claw_core_request_t *request,
                                                  char *tool_summary,
                                                  size_t tool_summary_size,
-                                                 char **out_tool_results_json)
+                                                 char **out_tool_results_json,
+                                                 bool *out_mcp_failed)
 {
     cJSON *tool_results = NULL;
     char *tool_results_json = NULL;
@@ -333,6 +334,7 @@ esp_err_t claw_core_append_tool_results_messages(claw_core_state_t *core,
         return ESP_ERR_INVALID_STATE;
     }
     *out_tool_results_json = NULL;
+    *out_mcp_failed = response->tool_call_count > 0;
 
     tool_results = cJSON_CreateArray();
     if (!tool_results) {
@@ -357,6 +359,10 @@ esp_err_t claw_core_append_tool_results_messages(claw_core_state_t *core,
                              request,
                              &tool_output,
                              core->cap_user_ctx);
+        if (err == ESP_OK || !response->tool_calls[i].name ||
+                strcmp(response->tool_calls[i].name, "mcp_call_tool") != 0) {
+            *out_mcp_failed = false;
+        }
         if (err != ESP_OK && !tool_output) {
             tool_output = claw_utils_string_dup(esp_err_to_name(err));
         }

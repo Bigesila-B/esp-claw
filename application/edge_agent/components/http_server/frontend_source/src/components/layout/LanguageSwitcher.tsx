@@ -45,7 +45,7 @@ export function LanguageSwitcher() {
   const localePath = () => currentLocale();
 
   return (
-    <div class="flex items-center gap-2">
+    <div class="flex shrink-0 items-center gap-1.5 sm:gap-2">
       <a
         href={`https://esp-claw.com/${localePath()}/`}
         target="_blank"
@@ -79,13 +79,14 @@ export function LanguageSwitcher() {
       <div class="relative" ref={rootRef}>
         <button
           type="button"
-          class="inline-flex items-center gap-1 text-[0.78rem] text-[var(--color-text-secondary)] px-2.5 py-1.5 rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] hover:bg-white/[0.04] hover:border-white/[0.12]"
+          class="inline-flex h-8 items-center justify-center gap-1 whitespace-nowrap text-[0.78rem] text-[var(--color-text-secondary)] px-2 sm:px-2.5 rounded-[var(--radius-sm)] border border-[var(--color-border-subtle)] hover:bg-white/[0.04] hover:border-white/[0.12]"
+          aria-label={currentLabel()}
           onClick={() => setOpen(!open())}
           aria-expanded={open()}
         >
-          <Languages class="w-4 h-4" />
-          <span>{currentLabel()}</span>
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" class="opacity-75">
+          <Languages class="w-4 h-4" aria-hidden="true" />
+          <span class="hidden sm:inline">{currentLabel()}</span>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" class="hidden opacity-75 sm:block" aria-hidden="true">
             <path
               d="M2.5 4L5 6.5L7.5 4"
               stroke="currentColor"

@@ -94,6 +94,8 @@ static const config_field_def_t CONFIG_FIELDS[] = {
 
     CONFIG_FIELD("time",         time_timezone),
     CONFIG_FIELD("chat",         show_tool_progress),
+    CONFIG_FIELD("chat",         auto_stickers),
+    CONFIG_FIELD("chat",         sticker_rate),
 };
 
 static const size_t CONFIG_FIELD_COUNT = sizeof(CONFIG_FIELDS) / sizeof(CONFIG_FIELDS[0]);
@@ -343,6 +345,12 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     /* Partial writes: only fields present in the JSON body are applied.
      * Empty string is a valid value (lets the client clear a slot). */
     size_t applied_count = 0;
+    const cJSON *rate = cJSON_GetObjectItemCaseSensitive(root, "sticker_rate");
+    if (rate && app_config_parse_sticker_rate(cJSON_GetStringValue(rate)) < 0) {
+        cJSON_Delete(root);
+        free(config);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Sticker frequency must be an integer from 0 to 100");
+    }
 
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
     const cJSON *token = cJSON_GetObjectItemCaseSensitive(root, "mcp_bearer_token");
@@ -386,6 +394,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
             }
         }
         if ((strcmp(field->name, "show_tool_progress") == 0 ||
+                strcmp(field->name, "auto_stickers") == 0 ||
                 strcmp(field->name, "llm_supports_tools") == 0 ||
                 strcmp(field->name, "llm_supports_vision") == 0 ||
                 strcmp(field->name, "llm_image_remote_url_only") == 0) &&

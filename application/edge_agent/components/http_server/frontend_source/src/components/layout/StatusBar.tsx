@@ -106,8 +106,8 @@ type StatusBarProps = {
 
 export const StatusBar: Component<StatusBarProps> = (props) => {
   return (
-    <header class="flex items-center justify-between gap-3 h-14 px-4 sm:px-5 border-b border-[var(--color-border-subtle)] bg-[rgba(10,11,14,0.85)] backdrop-blur-md sticky top-0 z-40">
-      <div class="flex items-center gap-3 sm:gap-4 min-w-0">
+    <header class="flex items-center justify-between gap-2 h-14 px-3 sm:gap-3 sm:px-5 border-b border-[var(--color-border-subtle)] bg-[rgba(10,11,14,0.85)] backdrop-blur-md sticky top-0 z-40">
+      <div class="flex items-center gap-2 sm:gap-4 min-w-0">
         {props.leadingSlot}
         <a href="/" class="flex items-center text-[var(--color-text-primary)] no-underline">
           <Logo />

@@ -3,6 +3,7 @@ import { t } from '../i18n';
 import type { AppConfig } from '../api/client';
 import { createConfigTab } from '../state/configTab';
 import { TabShell } from '../components/layout/TabShell';
+import { CloudMediaSettings } from '../components/CloudMediaSettings';
 import { PageHeader } from '../components/ui/PageHeader';
 import { CollapsibleConfigBlock, StaticConfigBlock } from '../components/ui/ConfigBlocks';
 import { TextInput } from '../components/ui/FormField';
@@ -484,6 +485,7 @@ export const LlmPage: Component = () => {
         onDiscard={tab.discard}
         note={t('restartHint') as string}
       />
+      <CloudMediaSettings />
     </TabShell>
   );
 };

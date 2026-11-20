@@ -33,6 +33,7 @@
 #define CAP_MCP_END_TIMEOUT_MS    2000
 #define CAP_MCP_SSE_READ_MS       150
 #define CAP_MCP_READ_SIZE        1024
+#define CAP_MCP_CATALOG_PAGE_SIZE 3
 #define CAP_MCP_JSON_DEPTH_MAX   32
 
 #define CAP_MCP_STREAMABLE_VERSION "2025-11-25"
@@ -918,6 +919,142 @@ static void discover_image_tools(cap_mcp_session_t *session, const cJSON *call_p
     cJSON_Delete(page_params);
 }
 
+static void set_catalog_page_size(const cJSON *schema, cJSON *arguments)
+{
+    const cJSON *limit = argument_schema(schema, "limit");
+    const char *type = json_string(limit, "type");
+    if (!type || (strcmp(type, "integer") != 0 && strcmp(type, "number") != 0)) {
+        return;
+    }
+    int size = CAP_MCP_CATALOG_PAGE_SIZE;
+    const cJSON *minimum = cJSON_GetObjectItemCaseSensitive(limit, "minimum");
+    const cJSON *maximum = cJSON_GetObjectItemCaseSensitive(limit, "maximum");
+    if (cJSON_IsNumber(maximum) && maximum->valueint < size) {
+        size = maximum->valueint;
+    }
+    if (cJSON_IsNumber(minimum) && minimum->valueint > size) {
+        size = minimum->valueint;
+    }
+    if (size > 0 && (!cJSON_IsNumber(maximum) || size <= maximum->valueint)) {
+        cJSON_AddNumberToObject(arguments, "limit", size);
+    }
+}
+
+static bool prepare_model_catalog(cap_mcp_session_t *session, cJSON *arguments, bool image_only, int rpc_id)
+{
+    cJSON *page = NULL;
+    int status;
+    bool available = false;
+    if (rpc_call(session, "tools/list", NULL, rpc_id, CAP_MCP_HTTP_TIMEOUT_MS, &status, &page) == ESP_OK) {
+        const cJSON *tool;
+        cJSON_ArrayForEach(tool, cJSON_GetObjectItemCaseSensitive(page, "tools")) {
+            const char *name = json_string(tool, "name");
+            if (!name || strcmp(name, "list_models") != 0) {
+                continue;
+            }
+            const cJSON *schema = cJSON_GetObjectItemCaseSensitive(tool, "inputSchema");
+            set_catalog_page_size(schema, arguments);
+            if (image_only && argument_schema(schema, "kind")) {
+                cJSON_AddStringToObject(arguments, "kind", "image");
+            }
+            available = true;
+            const cJSON *required;
+            cJSON_ArrayForEach(required, cJSON_GetObjectItemCaseSensitive(schema, "required")) {
+                const char *key = cJSON_GetStringValue(required);
+                if (!key || !cJSON_GetObjectItemCaseSensitive(arguments, key)) {
+                    available = false;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    cJSON_Delete(page);
+    return available;
+}
+
+static const cJSON *catalog_items(const cJSON *page)
+{
+    if (cJSON_IsArray(page)) {
+        return page;
+    }
+    const cJSON *items = cJSON_GetObjectItemCaseSensitive(page, "items");
+    if (!cJSON_IsArray(items)) {
+        items = cJSON_GetObjectItemCaseSensitive(page, "models");
+    }
+    if (!cJSON_IsArray(items)) {
+        items = cJSON_GetObjectItemCaseSensitive(page, "data");
+    }
+    return cJSON_IsArray(items) ? items : NULL;
+}
+
+static cJSON *catalog_model_ids(const cJSON *result)
+{
+    const cJSON *items = catalog_items(cJSON_GetObjectItemCaseSensitive(result, "structuredContent"));
+    cJSON *decoded = NULL;
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, cJSON_GetObjectItemCaseSensitive(result, "content")) {
+        if (items) {
+            break;
+        }
+        const char *text = json_string(entry, "text");
+        if (text) {
+            cJSON_Delete(decoded);
+            decoded = cap_mcp_parse_json(text, strlen(text));
+            items = catalog_items(decoded);
+        }
+    }
+
+    cJSON *ids = cJSON_CreateArray();
+    if (ids) {
+        cJSON_ArrayForEach(entry, items) {
+            if (cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(entry, "ready"))) {
+                continue;
+            }
+            const char *kind = json_string(entry, "kind");
+            if (kind && strcmp(kind, "image") != 0) {
+                continue;
+            }
+            const char *id = cJSON_GetStringValue(entry);
+            if (!id) id = json_string(entry, "key");
+            if (!id) id = json_string(entry, "id");
+            if (!id) id = json_string(entry, "model");
+            if (id && id[0] && strlen(id) <= MCP_IMAGE_FIELD_MAX && !strpbrk(id, "\r\n\t")) {
+                cJSON *value = cJSON_CreateString(id);
+                if (!value || !cJSON_AddItemToArray(ids, value)) {
+                    cJSON_Delete(value);
+                    break;
+                }
+                if (cJSON_GetArraySize(ids) >= CAP_MCP_CATALOG_PAGE_SIZE) {
+                    break;
+                }
+            }
+        }
+    }
+    cJSON_Delete(decoded);
+    return ids;
+}
+
+/* A rejected generation can be corrected with IDs from this same MCP server. */
+static void add_image_catalog_hint(cap_mcp_session_t *session, cJSON *result)
+{
+    cJSON *params = cJSON_CreateObject();
+    cJSON *arguments = cJSON_AddObjectToObject(params, "arguments");
+    cJSON *page = NULL;
+    int status;
+    if (arguments && cJSON_AddStringToObject(params, "name", "list_models") &&
+            prepare_model_catalog(session, arguments, true, 8) &&
+            rpc_call(session, "tools/call", params, 9, CAP_MCP_HTTP_TIMEOUT_MS, &status, &page) == ESP_OK &&
+            !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(page, "isError"))) {
+        cJSON *ids = catalog_model_ids(page);
+        if (cJSON_GetArraySize(ids) == 0 || !cJSON_AddItemToObjectCS(result, "esp_claw_model_ids", ids)) {
+            cJSON_Delete(ids);
+        }
+    }
+    cJSON_Delete(page);
+    cJSON_Delete(params);
+}
+
 static esp_err_t request(const cJSON *input, const char *test_token, uint32_t test_id, const char *method,
                          cJSON *params, int timeout_ms, cap_mcp_call_options_t *options, cJSON **result)
 {
@@ -948,7 +1085,16 @@ static esp_err_t request(const cJSON *input, const char *test_token, uint32_t te
         if (options && options->delivery) {
             discover_image_tools(session, params, options);
         }
+        const char *name = json_string(params, "name");
+        cJSON *arguments = cJSON_GetObjectItemCaseSensitive(params, "arguments");
+        if (name && strcmp(name, "list_models") == 0 && !cJSON_HasObjectItem(arguments, "limit")) {
+            prepare_model_catalog(session, arguments, false, 3);
+        }
         err = rpc_call(session, method, params, 2, timeout_ms, &status, result);
+        if (err == ESP_OK && result && name && strcmp(name, "generate_image") == 0 &&
+                cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(*result, "isError"))) {
+            add_image_catalog_hint(session, *result);
+        }
     }
     session_close(session);
     return err;
@@ -1021,11 +1167,13 @@ esp_err_t cap_mcp_call_remote_tool(const cJSON *input, cap_mcp_call_options_t *o
     const cJSON *arguments = cJSON_GetObjectItemCaseSensitive(input, "arguments");
     const char *request_id = options && options->delivery ? options->delivery->request_id_argument : NULL;
     bool fill_id = request_id && !cJSON_GetObjectItemCaseSensitive(arguments, request_id);
-    cJSON *owned_args = cJSON_IsObject(arguments) && fill_id ? cJSON_Duplicate(arguments, true) : NULL;
+    bool paginate = strcmp(name, "list_models") == 0 && !cJSON_HasObjectItem(arguments, "limit");
+    bool copy_arguments = fill_id || paginate;
+    cJSON *owned_args = cJSON_IsObject(arguments) && copy_arguments ? cJSON_Duplicate(arguments, true) : NULL;
     cJSON *params = cJSON_CreateObject();
     if (!cJSON_AddStringToObject(params, "name", name) ||
             !(cJSON_IsObject(arguments) ?
-              (fill_id ? cJSON_AddItemToObjectCS(params, "arguments", owned_args) :
+              (copy_arguments ? cJSON_AddItemToObjectCS(params, "arguments", owned_args) :
                          cJSON_AddItemReferenceToObject(params, "arguments", (cJSON *)arguments)) :
               cJSON_AddObjectToObject(params, "arguments") != NULL)) {
         cJSON_Delete(owned_args);

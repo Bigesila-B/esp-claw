@@ -201,7 +201,8 @@ esp_err_t claw_core_append_tool_results_messages(claw_core_state_t *core,
                                                  const claw_core_request_t *request,
                                                  char *tool_summary,
                                                  size_t tool_summary_size,
-                                                 char **out_tool_results_json);
+                                                 char **out_tool_results_json,
+                                                 bool *out_mcp_failed);
 void claw_core_finish_from_plain_text(uint32_t request_id,
                                       const claw_core_llm_response_t *llm_response,
                                       claw_core_response_t *response);
@@ -216,7 +217,7 @@ claw_core_agent_loop_phase_t claw_core_control_get_phase(claw_core_state_t *core
 
 void claw_core_publish_out_message_if_requested(const claw_core_request_item_t *request,
                                                 const claw_core_response_item_t *response,
-                                                bool persisted);
+                                                bool persisted, const char *image_url);
 void claw_core_publish_stage_tool_calls(const claw_core_request_t *request,
                                         const claw_core_llm_response_t *response,
                                         uint32_t iteration);

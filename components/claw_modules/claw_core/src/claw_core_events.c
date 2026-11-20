@@ -39,7 +39,7 @@ const char *claw_core_chat_error(const char *detail)
     }
     if (strncmp(detail, "HTTP ", 5) == 0) {
         int status = atoi(detail + 5);
-        if (status == 429) return "模型 API 请求过多。请稍等片刻，再发送 /retry。";
+        if (status == 429) return "聊天模型 API 已限流。请稍后再试。生图等工具任务请先确认任务状态，再决定是否重发。";
         if (status == 401 || status == 403 || status == 402) return "模型 API 拒绝了请求。请检查密钥和账户额度。";
         if (status == 404) return "找不到配置的模型或 API 地址。请检查模型设置。";
         if (status >= 500) return "模型服务暂时不可用。请稍后发送 /retry。";
@@ -52,6 +52,9 @@ const char *claw_core_chat_error(const char *detail)
     }
     if (strstr(detail, "NO_MEM") || strstr(detail, "Out of memory")) {
         return "设备可用内存不足。请稍后发送 /retry。";
+    }
+    if (strcmp(detail, "Consecutive MCP tool failures") == 0) {
+        return "MCP 工具连续调用失败。生图时可用 /mcp models 核对服务支持的模型 ID，再重发原请求。";
     }
     if (strcmp(detail, "request cancelled") == 0) return "本次回复已取消。";
     if (strcmp(detail, "Text retry cannot execute tools") == 0) {
@@ -70,6 +73,7 @@ static esp_err_t build_response_payload_json(const claw_core_request_t *request,
                                              const claw_core_response_t *response,
                                              const char *error_text,
                                              bool persisted,
+                                             const char *image_url,
                                              char **out_payload_json)
 {
     cJSON *root = NULL;
@@ -98,6 +102,7 @@ static esp_err_t build_response_payload_json(const claw_core_request_t *request,
         cJSON_Delete(root);
         return ESP_ERR_NO_MEM;
     }
+    if (image_url && !error_text) (void)cJSON_AddStringToObject(root, "reply_image_url", image_url);
 
     payload_json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -141,6 +146,7 @@ static esp_err_t build_out_message_event_common(const char *event_id_prefix,
 static esp_err_t build_agent_out_message_event(const claw_core_request_t *request,
                                                const claw_core_response_t *response,
                                                bool persisted,
+                                               const char *image_url,
                                                claw_event_t *out_event,
                                                char **out_payload_json)
 {
@@ -163,7 +169,7 @@ static esp_err_t build_agent_out_message_event(const claw_core_request_t *reques
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = build_response_payload_json(request, response, error_text, persisted, out_payload_json);
+    err = build_response_payload_json(request, response, error_text, persisted, image_url, out_payload_json);
     if (err != ESP_OK) {
         return err;
     }
@@ -212,7 +218,7 @@ static esp_err_t build_agent_out_message_event(const claw_core_request_t *reques
 
 void claw_core_publish_out_message_if_requested(const claw_core_request_item_t *request,
                                                 const claw_core_response_item_t *response,
-                                                bool persisted)
+                                                bool persisted, const char *image_url)
 {
     claw_event_t event = {0};
     char *payload_json = NULL;
@@ -226,6 +232,7 @@ void claw_core_publish_out_message_if_requested(const claw_core_request_item_t *
     err = build_agent_out_message_event(&request->view,
                                         &response->view,
                                         persisted,
+                                        image_url,
                                         &event,
                                         &payload_json);
     if (err == ESP_OK) {

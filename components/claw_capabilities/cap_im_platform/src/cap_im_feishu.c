@@ -1154,7 +1154,7 @@ static esp_err_t cap_im_feishu_extract_attachment_fields(const char *message_typ
     if (strcmp(message_type, "image") == 0) {
         resource_json = cJSON_GetObjectItem(root, "image_key");
         name_json = cJSON_GetObjectItem(root, "file_name");
-    } else if (strcmp(message_type, "file") == 0) {
+    } else if (strcmp(message_type, "file") == 0 || strcmp(message_type, "audio") == 0) {
         resource_json = cJSON_GetObjectItem(root, "file_key");
         name_json = cJSON_GetObjectItem(root, "file_name");
     }
@@ -1168,7 +1168,7 @@ static esp_err_t cap_im_feishu_extract_attachment_fields(const char *message_typ
     if (cJSON_IsString(name_json) && name_json->valuestring && name_json->valuestring[0]) {
         *out_original_filename = strdup(name_json->valuestring);
     } else {
-        *out_original_filename = strdup("");
+        *out_original_filename = strdup(strcmp(message_type, "audio") == 0 ? "voice.opus" : "");
     }
     cJSON_Delete(root);
     if (!*out_resource_key || !*out_original_filename) {
@@ -1460,7 +1460,7 @@ static esp_err_t cap_im_feishu_save_attachment(const char *chat_id,
 
     err = cap_im_feishu_download_attachment(message_id,
                                             resource_key,
-                                            attachment_kind,
+                                            strcmp(attachment_kind, "audio") == 0 ? "file" : attachment_kind,
                                             &path,
                                             mime,
                                             sizeof(mime),
@@ -2153,7 +2153,7 @@ static void cap_im_feishu_handle_message_event(cJSON *event)
         return;
     }
 
-    if (strcmp(message_type, "image") == 0 || strcmp(message_type, "file") == 0) {
+    if (strcmp(message_type, "image") == 0 || strcmp(message_type, "file") == 0 || strcmp(message_type, "audio") == 0) {
         cap_im_feishu_queue_attachment(route_id,
                                        sender_id,
                                        message_id,

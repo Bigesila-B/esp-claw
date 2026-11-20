@@ -701,6 +701,18 @@ static void cap_im_tg_handle_update(cJSON *update_json)
         }
     }
 
+    if (s_tg.enable_inbound_attachments) {
+        cJSON *voice = cJSON_GetObjectItem(message_json, "voice");
+        cJSON *audio = voice ? voice : cJSON_GetObjectItem(message_json, "audio");
+        const char *file_id = cJSON_GetStringValue(cJSON_GetObjectItem(audio, "file_id"));
+        if (file_id && *file_id) {
+            const char *name = cJSON_GetStringValue(cJSON_GetObjectItem(audio, "file_name"));
+            const char *mime = cJSON_GetStringValue(cJSON_GetObjectItem(audio, "mime_type"));
+            cap_im_tg_queue_attachment(chat_id, sender_id, message_id, voice ? "voice" : "audio", file_id,
+                                        name ? name : voice ? "voice.ogg" : NULL, mime, caption, "audio");
+        }
+    }
+
     text_json = cJSON_GetObjectItem(message_json, "text");
     if (cJSON_IsString(text_json) && text_json->valuestring && text_json->valuestring[0]) {
         if (cap_im_tg_publish_inbound_text(chat_id,
@@ -1363,7 +1375,24 @@ static esp_err_t cap_im_tg_send_file_execute(const char *input_json,
     return cap_im_tg_send_media_execute(input_json, ctx, output, output_size, false);
 }
 
+static esp_err_t cap_im_tg_send_voice_execute(const char *input, const claw_cap_call_context_t *ctx,
+                                              char *output, size_t size)
+{
+    cJSON *root = cJSON_Parse(input);
+    const char *path = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "path"));
+    esp_err_t err = ctx && ctx->chat_id && path ?
+        cap_im_tg_send_json_message("sendVoice", ctx->chat_id, "voice", path, NULL) : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(root);
+    snprintf(output, size, "%s", esp_err_to_name(err));
+    return err;
+}
+
 static const claw_cap_descriptor_t s_tg_descriptors[] = {
+    {
+        .id = "tg_send_voice", .name = "tg_send_voice", .family = "im",
+        .description = "Send a Telegram voice message from a URL.",
+        .kind = CLAW_CAP_KIND_CALLABLE, .execute = cap_im_tg_send_voice_execute,
+    },
     {
         .id = "tg_gateway",
         .name = "tg_gateway",

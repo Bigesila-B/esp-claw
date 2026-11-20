@@ -8,11 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cap_im_local.h"
+#include "app_cloud_media.h"
 #include "claw_session_mgr.h"
 #include "claw_event_router.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "sdkconfig.h"
+#if CONFIG_APP_CLAW_CAP_MEMORY
+#include "claw_memory.h"
+#endif
 
 #define WEBIM_WS_CLIENTS 8
 #define WEBIM_WS_WORK_MAX 8
@@ -70,6 +75,24 @@ static void catalog_changed(void *arg)
     (void)notify_webim(NULL);
 }
 
+#if CONFIG_APP_CLAW_CAP_MEMORY
+static esp_err_t save_outbound(void *argument)
+{
+    const cap_im_local_message_t *message = argument;
+    claw_session_info_t *info = malloc(sizeof(*info));
+    if (!info) return ESP_ERR_NO_MEM;
+    esp_err_t err = claw_session_mgr_catalog_get(message->chat_id, info);
+    if (err == ESP_OK) {
+        const claw_core_context_record_t record = {.type = CLAW_CORE_CONTEXT_RECORD_ASSISTANT_FINAL, .text = message->text};
+        const claw_core_context_persist_batch_t batch = {.session_id = info->session_id, .records = &record, .record_count = 1};
+        err = claw_memory_persist_context_callback(&batch, NULL);
+        if (err == ESP_OK) (void)claw_session_mgr_catalog_touch(info->session_id, NULL);
+    }
+    free(info);
+    return err;
+}
+#endif
+
 static esp_err_t outbound(const cap_im_local_message_t *message, void *arg)
 {
     (void)arg;
@@ -77,6 +100,10 @@ static esp_err_t outbound(const cap_im_local_message_t *message, void *arg)
     if (message->persisted && strlen(message->chat_id) == CLAW_SESSION_PUBLIC_ID_SIZE - 1) {
         return notify_webim(NULL);
     }
+#if CONFIG_APP_CLAW_CAP_MEMORY
+    if (message->save_to_history && strlen(message->chat_id) == CLAW_SESSION_PUBLIC_ID_SIZE - 1 &&
+            app_cloud_media_storage_call(save_outbound, (void *)message) == ESP_OK) return notify_webim(NULL);
+#endif
     cJSON *body = cJSON_CreateObject();
     if (!body || !cJSON_AddStringToObject(body, "type", "chat.message") ||
             !cJSON_AddStringToObject(body, "session", message->chat_id) ||

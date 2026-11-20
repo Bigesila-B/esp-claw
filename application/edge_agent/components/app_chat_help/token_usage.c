@@ -16,7 +16,8 @@
 #include "nvs.h"
 
 #define TOKEN_USAGE_NAMESPACE  "claw_usage"
-#define TOKEN_USAGE_KEY        "totals_v1"
+#define TOKEN_USAGE_KEY        "totals_v2"
+#define TOKEN_USAGE_LEGACY_KEY "totals_v1"
 #define TOKEN_FLUSH_INTERVAL   (60 * 1000000LL)
 #define TOKEN_MAX_JSON_INTEGER 9007199254740991.0
 
@@ -26,6 +27,13 @@ typedef struct {
     app_token_period_t today;
     app_token_period_t month;
 } token_usage_store_t;
+
+typedef struct {
+    uint32_t date;
+    uint32_t reserved;
+    uint64_t today[3];
+    uint64_t month[3];
+} token_usage_legacy_t;
 
 static const char *TAG = "app_token_usage";
 static SemaphoreHandle_t s_lock;
@@ -95,7 +103,29 @@ static bool usage_value(const cJSON *usage, const char *name, uint64_t *out)
     return true;
 }
 
-static bool response_token_count(const char *body, uint64_t *out)
+/* Denominator includes only requests that report a cache counter. */
+static void read_cache_usage(const cJSON *usage, uint64_t *input, uint64_t *hit)
+{
+    const cJSON *details = cJSON_GetObjectItemCaseSensitive(usage, "prompt_tokens_details");
+    bool known = usage_value(usage, "prompt_tokens", input) &&
+                 (usage_value(details, "cached_tokens", hit) ||
+                  usage_value(usage, "prompt_cache_hit_tokens", hit));
+    if (!known && usage_value(usage, "input_tokens", input)) {
+        details = cJSON_GetObjectItemCaseSensitive(usage, "input_tokens_details");
+        known = usage_value(details, "cached_tokens", hit);
+        if (!known && usage_value(usage, "cache_read_input_tokens", hit)) {
+            uint64_t created = 0;
+            usage_value(usage, "cache_creation_input_tokens", &created);
+            *input += *hit + created;
+            known = true;
+        }
+    }
+    if (!known || *hit > *input) {
+        *input = *hit = 0;
+    }
+}
+
+static bool response_token_count(const char *body, uint64_t *out, uint64_t *cache_input, uint64_t *cache_hit)
 {
     cJSON *root = cJSON_Parse(body);
     const cJSON *usage = cJSON_GetObjectItemCaseSensitive(root, "usage");
@@ -118,6 +148,7 @@ static bool response_token_count(const char *body, uint64_t *out)
         *out = input + output + cache_read + cache_created;
         reported = true;
     }
+    read_cache_usage(usage, cache_input, cache_hit);
     cJSON_Delete(root);
     return reported;
 }
@@ -126,7 +157,8 @@ static void record_response(const char *body)
 {
     struct tm date;
     uint64_t tokens = 0;
-    bool reported = response_token_count(body, &tokens);
+    uint64_t cache_input = 0, cache_hit = 0;
+    bool reported = response_token_count(body, &tokens, &cache_input, &cache_hit);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     time_t now = time(NULL);
@@ -144,6 +176,10 @@ static void record_response(const char *body)
         memset(&s_totals.today, 0, sizeof(s_totals.today));
         s_totals.date = key;
     }
+    s_totals.today.cache_input += cache_input;
+    s_totals.month.cache_input += cache_input;
+    s_totals.today.cache_hit += cache_hit;
+    s_totals.month.cache_hit += cache_hit;
     if (reported) {
         s_totals.today.tokens += tokens;
         s_totals.month.tokens += tokens;
@@ -183,6 +219,21 @@ esp_err_t app_token_usage_init(void)
             memset(&s_totals, 0, sizeof(s_totals));
         }
         s_durable = err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND;
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            token_usage_legacy_t previous = {0};
+            size = sizeof(previous);
+            if (nvs_get_blob(s_nvs, TOKEN_USAGE_LEGACY_KEY, &previous, &size) == ESP_OK &&
+                    size == sizeof(previous)) {
+                s_totals.date = previous.date;
+                s_totals.today = (app_token_period_t) {
+                    .tokens = previous.today[0], .reported = previous.today[1], .unreported = previous.today[2],
+                };
+                s_totals.month = (app_token_period_t) {
+                    .tokens = previous.month[0], .reported = previous.month[1], .unreported = previous.month[2],
+                };
+                s_dirty = true;
+            }
+        }
         err = esp_timer_create(&(esp_timer_create_args_t) {
             .callback = flush_tokens,
             .name = "claw_token_save",

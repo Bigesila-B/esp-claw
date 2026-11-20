@@ -14,9 +14,11 @@
 
 #include "claw_cap.h"
 #include "claw_agent_mgr.h"
+#include "claw_core.h"
 #include "claw_event_router.h"
 #include "claw_paths.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "sdkconfig.h"
 #if CONFIG_APP_CLAW_CAP_MEMORY
 #include "claw_memory.h"
@@ -25,6 +27,7 @@
 #include "cap_mcp_client.h"
 #endif
 
+#include "app_cloud_media.h"
 #include "device_status.h"
 #include "token_usage.h"
 
@@ -38,6 +41,7 @@
 #define STICKER_CATALOG_MAX  (16 * 1024)
 #define STICKER_NAME_MAX     64
 #define STICKER_URL_MAX      1500
+#define STICKER_MARKER       "[[sticker:"
 #define STICKER_CDN          "https://cdn.jsdelivr.net/gh/jdecked/twemoji@17.0.3/assets/72x72/"
 #define MCP_LAST_IMAGE_COMMAND "/mcp last-image"
 
@@ -49,6 +53,13 @@ static const char s_default_stickers[] =
     "庆祝=" STICKER_CDN "1f389.png\n"
     "无语=" STICKER_CDN "1f644.png\n"
     "比心=" STICKER_CDN "1faf6.png\n";
+
+static atomic_uint s_auto_sticker_rate;
+
+void app_chat_help_set_auto_sticker_rate(unsigned rate)
+{
+    atomic_store(&s_auto_sticker_rate, rate);
+}
 
 static const char *TAG = "app_chat_help";
 static atomic_bool s_registered;
@@ -177,6 +188,14 @@ static void visit_commands(const claw_event_t *event, help_command_visitor_t vis
         .command = STICKER_COMMAND " [名称]",
         .description = "List or send stickers from an image host",
         .description_zh = "查看表情包目录或按名称发送",
+    }, ctx) || !visit(&(help_command_t) {
+        .command = "/image <提示词>",
+        .description = "Generate an image with the configured cloud API",
+        .description_zh = "用已启用的云端生图模型生成图片",
+    }, ctx) || !visit(&(help_command_t) {
+        .command = "/tts <文字>",
+        .description = "Read text aloud with the configured cloud API",
+        .description_zh = "用已启用的云端语音模型朗读文字",
     }, ctx)) {
         return;
     }
@@ -303,6 +322,131 @@ static bool sticker_url_valid(const char *url)
     return host_len > 0 && !memchr(host, '@', host_len);
 }
 
+static char *parse_sticker_entry(char **name)
+{
+    char *line = *name;
+    while (isspace((unsigned char)*line)) line++;
+    char *url = strchr(line, '=');
+    if (*line == '#' || !url) return NULL;
+    *url++ = '\0';
+    line[trimmed_length(line)] = '\0';
+    while (isspace((unsigned char)*url)) url++;
+    url[trimmed_length(url)] = '\0';
+    size_t size = strlen(line);
+    *name = line;
+    return size && size <= STICKER_NAME_MAX && sticker_url_valid(url) ? url : NULL;
+}
+
+static esp_err_t read_auto_sticker_catalog(void *output)
+{
+    bool built_in;
+    char *catalog = load_sticker_catalog(&built_in);
+    *(char **)output = catalog;
+    return catalog ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+static const char *sticker_request_channel(const claw_core_request_t *request)
+{
+    const char *channel = request->target_channel && *request->target_channel ?
+                          request->target_channel : request->source_channel;
+    const char *source = request->source_cap;
+    if (!(request->flags & CLAW_CORE_REQUEST_FLAG_PUBLISH_OUT_MESSAGE) ||
+            (request->flags & CLAW_CORE_REQUEST_FLAG_TEXT_RETRY) || !channel || !source) return NULL;
+    if (strcmp(source, "web_chat") && strcmp(source, "local_gateway") &&
+            strcmp(source, "qq_gateway") && strcmp(source, "tg_gateway")) return NULL;
+    return strcmp(channel, "web") && strcmp(channel, "qq") && strcmp(channel, "telegram") ? NULL : channel;
+}
+
+static char *auto_sticker_instructions(const claw_core_request_t *request)
+{
+    if (!atomic_load(&s_auto_sticker_rate) || !sticker_request_channel(request)) return NULL;
+    char *catalog = NULL;
+    if (app_cloud_media_storage_call(read_auto_sticker_catalog, &catalog) != ESP_OK) return NULL;
+    cJSON *names = cJSON_CreateArray();
+    char *next = NULL;
+    char *start = strncmp(catalog, "\xef\xbb\xbf", 3) == 0 ? catalog + 3 : catalog;
+    for (char *line = strtok_r(start, "\r\n", &next); line && names && cJSON_GetArraySize(names) < 12;
+            line = strtok_r(NULL, "\r\n", &next)) {
+        if (parse_sticker_entry(&line) && !strpbrk(line, "[]\t")) {
+            cJSON *name = cJSON_CreateString(line);
+            if (!name || !cJSON_AddItemToArray(names, name)) cJSON_Delete(name);
+        }
+    }
+    char *list = cJSON_GetArraySize(names) ? cJSON_PrintUnformatted(names) : NULL;
+    char *prompt = NULL;
+    if (list) {
+        (void)asprintf(&prompt,
+                       "Optional reply sticker. In casual conversation, occasionally choose one fitting sticker "
+                       "from %s based on the conversation, without waiting to be asked. "
+                       "Keep the main reply normal and add " STICKER_MARKER "NAME]] on its own final line only. "
+                       "Omit it for routine answers, serious topics, or when including other media. Use the exact name, up to one.",
+                       list);
+    }
+    cJSON_free(list);
+    cJSON_Delete(names);
+    free(catalog);
+    return prompt;
+}
+
+static bool finalize_auto_sticker(const claw_core_request_t *request, char **text,
+                                  bool has_images, char **image_url)
+{
+    const char *channel = sticker_request_channel(request);
+    const size_t prefix = sizeof(STICKER_MARKER) - 1;
+    char *end = *text + trimmed_length(*text);
+    char *line = end;
+    const char *name = NULL;
+    size_t name_size = 0;
+    unsigned markers = 0;
+    for (;;) {
+        line = end;
+        while (line > *text && line[-1] != '\n') line--;
+        size_t size = end - line;
+        if (size <= prefix + 2 || memcmp(line, STICKER_MARKER, prefix) || memcmp(end - 2, "]]", 2)) break;
+        if (++markers == 1) {
+            name = line + prefix;
+            name_size = size - prefix - 2;
+        }
+        end = line;
+        while (end > *text && isspace((unsigned char)end[-1])) end--;
+    }
+    if (!markers) return false;
+    *end = '\0';
+    if (!**text) {
+        char *fallback = strdup("本轮没有可显示的文字回复。");
+        if (fallback) {
+            free(*text);
+            *text = fallback;
+        }
+        return true;
+    }
+    unsigned rate = atomic_load(&s_auto_sticker_rate);
+    if (markers != 1 || !channel || !rate || name_size > STICKER_NAME_MAX ||
+            has_images || strstr(*text, "![")) return true;
+    if (rate < 100 && esp_random() % 100 >= rate) return true;
+    char *catalog = NULL;
+    if (app_cloud_media_storage_call(read_auto_sticker_catalog, &catalog) != ESP_OK) return true;
+    char *next = NULL;
+    char *start = strncmp(catalog, "\xef\xbb\xbf", 3) == 0 ? catalog + 3 : catalog;
+    for (char *entry = strtok_r(start, "\r\n", &next); entry; entry = strtok_r(NULL, "\r\n", &next)) {
+        const char *url = parse_sticker_entry(&entry);
+        if (url && strlen(entry) == name_size && memcmp(name, entry, name_size) == 0) {
+            if (strcmp(channel, "web") == 0) {
+                char *reply = NULL;
+                if (asprintf(&reply, "%s\n\n![表情包](<%s>)", *text, url) >= 0) {
+                    free(*text);
+                    *text = reply;
+                }
+            } else {
+                *image_url = strdup(url);
+            }
+            break;
+        }
+    }
+    free(catalog);
+    return true;
+}
+
 static esp_err_t reply_hosted_image(const claw_event_t *event, const char *url, const char *label)
 {
     const char *channel = event->source_channel;
@@ -316,26 +460,7 @@ static esp_err_t reply_hosted_image(const claw_event_t *event, const char *url, 
         return err;
     }
 
-    const char *image_cap = strcmp(channel, "qq") == 0 ? "qq_send_image" :
-                            strcmp(channel, "telegram") == 0 ? "tg_send_image" : NULL;
-    if (image_cap && command_cap_ready(image_cap)) {
-        cJSON *body = cJSON_CreateObject();
-        char *input = cJSON_AddStringToObject(body, "path", url) ? cJSON_PrintUnformatted(body) : NULL;
-        cJSON_Delete(body);
-        if (input) {
-            claw_cap_call_context_t ctx = {
-                .caller = CLAW_CAP_CALLER_SYSTEM,
-                .channel = channel, .chat_id = event->chat_id,
-                .target_channel = channel, .target_chat_id = event->chat_id,
-            };
-            char output[96];
-            esp_err_t err = claw_cap_call(image_cap, input, &ctx, output, sizeof(output));
-            cJSON_free(input);
-            if (err == ESP_OK) {
-                return ESP_OK;
-            }
-        }
-    }
+    if (claw_event_router_send_image_url(event, url) == ESP_OK) return ESP_OK;
     return claw_event_router_reply(event, url);
 }
 
@@ -377,23 +502,9 @@ static esp_err_t send_sticker_reply(const claw_event_t *event, const char *name)
     const char *selected = NULL;
     bool found = false;
     for (char *line = strtok_r(start, "\r\n", &next); line; line = strtok_r(NULL, "\r\n", &next)) {
-        while (isspace((unsigned char)*line)) {
-            line++;
-        }
-        char *url = strchr(line, '=');
-        if (*line == '#' || !url) {
-            continue;
-        }
-        *url++ = '\0';
-        line[trimmed_length(line)] = '\0';
-        while (isspace((unsigned char)*url)) {
-            url++;
-        }
-        url[trimmed_length(url)] = '\0';
+        char *url = parse_sticker_entry(&line);
+        if (!url) continue;
         size_t label_len = strlen(line);
-        if (!label_len || label_len > STICKER_NAME_MAX || !sticker_url_valid(url)) {
-            continue;
-        }
         found = true;
         if (name_len > 0) {
             if (name_len == label_len && memcmp(name, line, name_len) == 0) {
@@ -585,6 +696,11 @@ static esp_err_t send_help_reply(const claw_event_t *event)
     append_context_usage(&out);
     append_usage(&out, "今日 token", &usage.today, usage.available);
     append_usage(&out, "本月 token", &usage.month, usage.available);
+    if (usage.month.cache_input) {
+        append_help(&out, "本月输入缓存 %.1f%%（%llu/%llu token）\n",
+                     100.0 * usage.month.cache_hit / usage.month.cache_input,
+                     (unsigned long long)usage.month.cache_hit, (unsigned long long)usage.month.cache_input);
+    }
     if (usage.available && !usage.durable) {
         append_help(&out, "用量暂存于内存\n");
     }
@@ -622,6 +738,8 @@ static void add_usage_json(cJSON *root, const char *key, const app_token_period_
     cJSON_AddNumberToObject(item, "tokens", (double)period->tokens);
     cJSON_AddNumberToObject(item, "reported", (double)period->reported);
     cJSON_AddNumberToObject(item, "unreported", (double)period->unreported);
+    cJSON_AddNumberToObject(item, "cache_input", (double)period->cache_input);
+    cJSON_AddNumberToObject(item, "cache_hit", (double)period->cache_hit);
 }
 
 cJSON *app_chat_help_json(void)
@@ -662,7 +780,13 @@ cJSON *app_chat_help_json(void)
 
 static bool handle_chat_command(const claw_event_t *event, esp_err_t *out_status)
 {
+    if (app_cloud_media_handle_event(event, out_status)) {
+        return true;
+    }
     const char *text = event->text;
+    if (!text) {
+        return false;
+    }
     while (isspace((unsigned char)*text)) {
         ++text;
     }
@@ -717,12 +841,19 @@ bool app_chat_help_is_reply(const char *text)
 
 esp_err_t app_chat_help_init(void)
 {
+    claw_core_set_reply_hooks(&(claw_core_reply_hooks_t) {
+        .instructions = auto_sticker_instructions, .finalize = finalize_auto_sticker,
+    });
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
     cap_mcp_client_set_chat_sender(reply_mcp_message);
 #endif
     esp_err_t err = app_chat_help_status_init();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "CPU sampling unavailable: %s", esp_err_to_name(err));
+    }
+    esp_err_t media_err = app_cloud_media_init();
+    if (media_err != ESP_OK) {
+        ESP_LOGW(TAG, "Cloud media initialization: %s", esp_err_to_name(media_err));
     }
     return app_token_usage_init();
 }

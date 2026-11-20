@@ -28,6 +28,8 @@ typedef struct {
     char ap_password[APP_CONFIG_STR_LEN];
     char ap_behavior[16];
     char show_tool_progress[8];
+    char auto_stickers[8];
+    char sticker_rate[4];
     char llm_api_key[APP_CONFIG_STR_LEN];
     char llm_backend_type[32];
     char llm_model[64];
@@ -71,6 +73,8 @@ esp_err_t app_config_validate_wifi(const app_config_t *config, const char **mess
 void app_config_to_claw(const app_config_t *config, app_claw_config_t *out);
 const char *app_config_get_timezone(const app_config_t *config);
 bool app_config_show_tool_progress(const app_config_t *config);
+int app_config_parse_sticker_rate(const char *value);
+unsigned app_config_auto_sticker_rate(const app_config_t *config);
 
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
 struct cJSON;

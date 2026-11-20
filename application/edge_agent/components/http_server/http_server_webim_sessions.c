@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "http_server_priv.h"
+#include "app_cloud_media.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,8 @@ esp_err_t http_server_webim_error(httpd_req_t *req, esp_err_t err)
         status = "409 Conflict"; code = "session_busy"; message = "会话状态已有变化，请刷新后重试。"; break;
     case ESP_ERR_NOT_SUPPORTED:
         status = "409 Conflict"; code = "channel_unavailable"; message = "此聊天通道暂时无法发送消息。"; break;
+    case ESP_ERR_NOT_ALLOWED:
+        status = "409 Conflict"; code = "stt_unavailable"; message = "请先在 LLM 设置中启用云端语音转写模型。"; break;
     case ESP_ERR_NO_MEM:
     case ESP_ERR_TIMEOUT:
         status = "503 Service Unavailable"; code = "busy_or_full"; message = "设备较忙，请稍后重试。"; break;
@@ -241,6 +244,7 @@ esp_err_t http_server_webim_send_session(httpd_req_t *req)
     const char *legacy_chat = cJSON_GetStringValue(cJSON_GetObjectItem(body, "chat_id"));
     const bool legacy = !id && !message_id && legacy_chat && legacy_chat[0] && strlen(legacy_chat) < 96;
     cJSON *files = cJSON_GetObjectItem(body, "files");
+    const char *audio = NULL;
     char *combined = calloc(1, WEBIM_MESSAGE_MAX + 1);
     claw_session_info_t *info = calloc(1, sizeof(*info));
     if (!combined || !info) err = ESP_ERR_NO_MEM;
@@ -253,6 +257,10 @@ esp_err_t http_server_webim_send_session(httpd_req_t *req)
         if (err != ESP_OK) break;
         const char *path = cJSON_GetStringValue(file);
         if (!path || strncmp(path, "/inbox/webim/", 13) != 0 || !http_server_path_is_safe(path)) { err = ESP_ERR_INVALID_ARG; break; }
+        if (app_cloud_media_is_audio_file(path)) {
+            if (legacy || cJSON_GetArraySize(files) != 1) { err = ESP_ERR_INVALID_ARG; break; }
+            audio = path;
+        }
         size_t used = strlen(combined);
         int n = snprintf(combined + used, WEBIM_MESSAGE_MAX + 1 - used, "\n/files%s", path);
         if (n < 0 || n >= WEBIM_MESSAGE_MAX + 1 - used) err = ESP_ERR_INVALID_SIZE;
@@ -283,7 +291,16 @@ esp_err_t http_server_webim_send_session(httpd_req_t *req)
         }
     }
     if (err == ESP_OK && !duplicate) {
-        err = post_web_message(info, combined, message_id, &run_id);
+        if (audio) {
+            char *path = malloc(HTTP_SERVER_PATH_MAX);
+            err = path ? http_server_resolve_storage_path(audio, path, HTTP_SERVER_PATH_MAX) : ESP_ERR_NO_MEM;
+            if (err == ESP_OK) err = app_cloud_media_web_transcribe(info->id, message_id, path, text,
+                                                                   strcmp(reply_channel(info), "web") != 0);
+            if (err == ESP_ERR_NOT_FOUND) err = ESP_ERR_NOT_ALLOWED;
+            free(path);
+        } else {
+            err = post_web_message(info, combined, message_id, &run_id);
+        }
         if (err == ESP_OK) {
             http_webim_receipt_t *slot = &ctx->webim_receipts[ctx->webim_receipt_next++ % HTTP_WEBIM_RECEIPTS];
             free(slot->text); slot->text = combined; combined = NULL;

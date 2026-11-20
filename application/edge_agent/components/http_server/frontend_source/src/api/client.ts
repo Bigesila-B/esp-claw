@@ -11,6 +11,8 @@ export type AppConfig = {
   ap_password: string;
   ap_behavior: string;
   show_tool_progress: string;
+  auto_stickers: string;
+  sticker_rate: string;
   llm_api_key: string;
   llm_backend_type: string;
   llm_model: string;
@@ -85,7 +87,7 @@ export const GROUP_FIELDS: Record<ConfigGroup, (keyof AppConfig)[]> = {
   capabilities: ['enabled_cap_groups', 'llm_visible_cap_groups'],
   skills: ['enabled_lua_modules'],
   time: ['time_timezone'],
-  chat: ['show_tool_progress'],
+  chat: ['show_tool_progress', 'auto_stickers', 'sticker_rate'],
 };
 
 export function blankConfig(): Partial<AppConfig> {
@@ -466,7 +468,34 @@ export type WebImMessage = {
   links?: WebImLink[];
 };
 
-export type ChatHelpPeriod = { tokens: number; reported: number; unreported: number };
+export type ChatHelpPeriod = { tokens: number; reported: number; unreported: number; cache_input?: number; cache_hit?: number };
+
+export type MediaKind = 'image' | 'tts' | 'stt';
+export type MediaModel = {
+  name: string; kind: MediaKind; url: string; model: string; enabled: boolean; api_key_set?: boolean;
+  model_field?: string; input_field?: string; result_path?: string; auth_header?: string; auth_prefix?: string;
+  job_path?: string; poll_url?: string; status_path?: string; success_value?: string; failure_value?: string;
+  parameters?: Record<string, unknown>;
+};
+
+export type DeviceSchedule = {
+  id: string; enabled: boolean; kind: string; status: string; next_fire_ms: number;
+  text: string; source_channel: string; chat_id: string;
+};
+
+export function fetchMediaModels() {
+  return request<MediaModel[]>('/api/media-models', undefined, 'Failed to load cloud media models');
+}
+
+export function fetchDeviceSchedules() {
+  return request<DeviceSchedule[]>('/api/schedules', undefined, 'Failed to load schedules');
+}
+
+export function saveDeviceSetting(path: '/api/media-models' | '/api/schedules', data: object) {
+  return request<{ ok: boolean }>(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
+  }, 'Failed to save device settings');
+}
 
 export type ChatHelpSnapshot = {
   ready: boolean;

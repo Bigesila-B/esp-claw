@@ -61,6 +61,7 @@ static const char *TAG = "cap_im_qq";
 
 #define CAP_IM_QQ_INTENTS ((1 << 30) | (1 << 25))
 #define CAP_IM_QQ_FILE_TYPE_IMAGE 1
+#define CAP_IM_QQ_FILE_TYPE_VOICE 3
 #define CAP_IM_QQ_FILE_TYPE_FILE  4
 #define CAP_IM_QQ_IMAGE_URL_MAX   1500
 
@@ -702,6 +703,7 @@ static esp_err_t cap_im_qq_publish_attachment_event(const char *chat_id,
 
     strlcpy(event.source_cap, "qq_gateway", sizeof(event.source_cap));
     strlcpy(event.event_type, "attachment_saved", sizeof(event.event_type));
+    event.reply_to_message_id = (char *)message_id;
     strlcpy(event.source_channel, "qq", sizeof(event.source_channel));
     strlcpy(event.chat_id, chat_id, sizeof(event.chat_id));
     if (sender_id && sender_id[0]) {
@@ -1325,9 +1327,18 @@ static char *cap_im_qq_file_to_base64(const char *path)
     return (char *)encoded_buf;
 }
 
+static bool cap_im_qq_add_reply(cJSON *body, const char *reply_id)
+{
+    static atomic_uint reply_sequence;
+    if (!reply_id || !*reply_id) return true;
+    unsigned seq = atomic_fetch_add(&reply_sequence, 1) % INT32_MAX + 1;
+    return cJSON_AddStringToObject(body, "msg_id", reply_id) &&
+           cJSON_AddNumberToObject(body, "msg_seq", seq);
+}
+
 static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
                                               const char *file_info,
-                                              const char *caption)
+                                              const char *caption, const char *reply_id)
 {
     cJSON *body = NULL;
     cJSON *media = NULL;
@@ -1341,6 +1352,10 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
 
     body = cJSON_CreateObject();
     if (!body) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (!cap_im_qq_add_reply(body, reply_id)) {
+        cJSON_Delete(body);
         return ESP_ERR_NO_MEM;
     }
     cJSON_AddNumberToObject(body, "msg_type", 7);
@@ -1373,9 +1388,9 @@ static esp_err_t cap_im_qq_send_media_message(const char *chat_id,
     return err;
 }
 
-static bool cap_im_qq_is_image_url(const char *path, uint32_t file_type)
+static bool cap_im_qq_is_media_url(const char *path, uint32_t file_type)
 {
-    if (file_type != CAP_IM_QQ_FILE_TYPE_IMAGE ||
+    if ((file_type != CAP_IM_QQ_FILE_TYPE_IMAGE && file_type != CAP_IM_QQ_FILE_TYPE_VOICE) ||
             (strncmp(path, "https://", 8) != 0 && strncmp(path, "http://", 7) != 0) ||
             strlen(path) > CAP_IM_QQ_IMAGE_URL_MAX || strpbrk(path, "#\\<> \t\r\n")) {
         return false;
@@ -1406,7 +1421,7 @@ static esp_err_t cap_im_qq_upload_media(const char *chat_id,
     if (!chat_id || !path || !path[0] || !out_file_info) {
         return ESP_ERR_INVALID_ARG;
     }
-    bool from_url = cap_im_qq_is_image_url(path, file_type);
+    bool from_url = cap_im_qq_is_media_url(path, file_type);
     if (!from_url) {
         if (stat(path, &st) != 0) {
             return errno == ENOENT ? ESP_ERR_NOT_FOUND : ESP_FAIL;
@@ -1489,7 +1504,7 @@ static esp_err_t cap_im_qq_send_media(const char *chat_id,
                                       const char *path,
                                       const char *caption,
                                       uint32_t file_type,
-                                      const char *kind)
+                                      const char *kind, const char *reply_id)
 {
     char *file_info = NULL;
     char *resolved_caption = NULL;
@@ -1541,7 +1556,7 @@ static esp_err_t cap_im_qq_send_media(const char *chat_id,
 
     err = cap_im_qq_send_media_message(chat_id,
                                        file_info,
-                                       resolved_caption ? resolved_caption : caption);
+                                       resolved_caption ? resolved_caption : caption, reply_id);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "QQ %s send failed for %s: %s", kind, chat_id, esp_err_to_name(err));
         free(resolved_caption);
@@ -1549,7 +1564,7 @@ static esp_err_t cap_im_qq_send_media(const char *chat_id,
         return err;
     }
 
-    ESP_LOGI(TAG, "QQ %s send success to %s: %s", kind, chat_id, path);
+    ESP_LOGI(TAG, "QQ %s send success to %s", kind, chat_id);
     free(resolved_caption);
     free(file_info);
     return ESP_OK;
@@ -1558,7 +1573,6 @@ static esp_err_t cap_im_qq_send_media(const char *chat_id,
 static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id, const char *message,
                                               const char *reply_id)
 {
-    static atomic_uint reply_sequence;
     cJSON *body = cJSON_CreateObject();
     char *json_str = NULL;
     char *path = NULL;
@@ -1580,13 +1594,9 @@ static esp_err_t cap_im_qq_send_message_chunk(const char *chat_id, const char *m
         cJSON_AddStringToObject(body, "content", message);
     }
     cJSON_AddNumberToObject(body, "msg_type", s_qq.msg_type);
-    if (reply_id && reply_id[0]) {
-        unsigned seq = atomic_fetch_add(&reply_sequence, 1) % INT32_MAX + 1;
-        if (!cJSON_AddStringToObject(body, "msg_id", reply_id) ||
-                !cJSON_AddNumberToObject(body, "msg_seq", seq)) {
-            cJSON_Delete(body);
-            return ESP_ERR_NO_MEM;
-        }
+    if (!cap_im_qq_add_reply(body, reply_id)) {
+        cJSON_Delete(body);
+        return ESP_ERR_NO_MEM;
     }
     json_str = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
@@ -1935,7 +1945,9 @@ static esp_err_t cap_im_qq_send_media_execute(const char *input_json,
         return ESP_ERR_INVALID_ARG;
     }
 
-    err = cap_im_qq_send_media(chat_id, path, caption, file_type, kind);
+    const char *reply_id = ctx && ctx->caller == CLAW_CAP_CALLER_SYSTEM && ctx->source_cap &&
+                           strcmp(ctx->source_cap, "claw_event_router") == 0 ? ctx->correlation_id : NULL;
+    err = cap_im_qq_send_media(chat_id, path, caption, file_type, kind, reply_id);
     cJSON_Delete(root);
     if (err != ESP_OK) {
         snprintf(output, output_size, "Error: %s", esp_err_to_name(err));
@@ -1972,7 +1984,18 @@ static esp_err_t cap_im_qq_send_file_execute(const char *input_json,
                                         "file");
 }
 
+static esp_err_t cap_im_qq_send_voice_execute(const char *input, const claw_cap_call_context_t *ctx,
+                                              char *output, size_t size)
+{
+    return cap_im_qq_send_media_execute(input, ctx, output, size, CAP_IM_QQ_FILE_TYPE_VOICE, "voice");
+}
+
 static const claw_cap_descriptor_t s_qq_descriptors[] = {
+    {
+        .id = "qq_send_voice", .name = "qq_send_voice", .family = "im",
+        .description = "Send a QQ-compatible voice message from a URL.",
+        .kind = CLAW_CAP_KIND_CALLABLE, .execute = cap_im_qq_send_voice_execute,
+    },
     {
         .id = "qq_gateway",
         .name = "qq_gateway",
@@ -2167,7 +2190,7 @@ esp_err_t cap_im_qq_send_image(const char *chat_id, const char *path, const char
                                 path,
                                 caption,
                                 CAP_IM_QQ_FILE_TYPE_IMAGE,
-                                "image");
+                                "image", NULL);
 }
 
 esp_err_t cap_im_qq_send_file(const char *chat_id, const char *path, const char *caption)
@@ -2179,5 +2202,5 @@ esp_err_t cap_im_qq_send_file(const char *chat_id, const char *path, const char 
                                 path,
                                 caption,
                                 CAP_IM_QQ_FILE_TYPE_FILE,
-                                "file");
+                                "file", NULL);
 }

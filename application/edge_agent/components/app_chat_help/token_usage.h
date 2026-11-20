@@ -13,6 +13,8 @@ typedef struct {
     uint64_t tokens;
     uint64_t reported;
     uint64_t unreported;
+    uint64_t cache_input;
+    uint64_t cache_hit;
 } app_token_period_t;
 
 typedef struct {

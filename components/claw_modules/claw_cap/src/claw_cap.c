@@ -463,6 +463,7 @@ esp_err_t claw_cap_call_from_core(const char *cap_name,
 
     if (request) {
         ctx.request_id = request->request_id;
+        ctx.correlation_id = request->source_message_id;
         ctx.session_id = request->session_id;
         ctx.channel = request->source_channel;
         ctx.chat_id = request->source_chat_id;

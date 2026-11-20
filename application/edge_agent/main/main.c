@@ -115,6 +115,7 @@ static esp_err_t main_save_config(const app_config_t *config)
         return err;
     }
     claw_core_set_tool_progress_enabled(app_config_show_tool_progress(config));
+    app_chat_help_set_auto_sticker_rate(app_config_auto_sticker_rate(config));
 
     claw_config = calloc(1, sizeof(*claw_config));
     if (!claw_config) {
@@ -330,6 +331,7 @@ void app_main(void)
     ESP_ERROR_CHECK(app_config_init());
     ESP_ERROR_CHECK(app_config_load(s_config));
     claw_core_set_tool_progress_enabled(app_config_show_tool_progress(s_config));
+    app_chat_help_set_auto_sticker_rate(app_config_auto_sticker_rate(s_config));
     app_config_to_claw(s_config, s_claw_config);
     init_timezone(app_config_get_timezone(s_config)); // no need to check error
     esp_err_t help_err = app_chat_help_init();

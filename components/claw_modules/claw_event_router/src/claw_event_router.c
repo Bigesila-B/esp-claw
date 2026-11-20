@@ -1890,11 +1890,38 @@ esp_err_t claw_event_router_reply(const claw_event_t *event, const char *message
                                        cap_name, sizeof(cap_name), output, sizeof(output));
 }
 
+esp_err_t claw_event_router_send_image_url(const claw_event_t *event, const char *url)
+{
+    if (!event || !url || (strncmp(url, "https://", 8) && strncmp(url, "http://", 7)) ||
+            strlen(url) > 1500 || strpbrk(url, "<>\\ \r\n\t")) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const char *channel = event->source_channel;
+    const char *cap = strcmp(channel, "qq") == 0 ? "qq_send_image" :
+                      strcmp(channel, "telegram") == 0 ? "tg_send_image" : NULL;
+    if (!cap) return ESP_ERR_NOT_SUPPORTED;
+    cJSON *body = cJSON_CreateObject();
+    char *input = cJSON_AddStringToObject(body, "path", url) ? cJSON_PrintUnformatted(body) : NULL;
+    cJSON_Delete(body);
+    if (!input) return ESP_ERR_NO_MEM;
+    const claw_cap_call_context_t context = {
+        .caller = CLAW_CAP_CALLER_SYSTEM, .source_cap = "claw_event_router",
+        .channel = channel, .chat_id = event->chat_id,
+        .target_channel = channel, .target_chat_id = event->chat_id,
+        .correlation_id = event->reply_to_message_id,
+    };
+    char output[96];
+    esp_err_t err = claw_cap_call(cap, input, &context, output, sizeof(output));
+    cJSON_free(input);
+    return err;
+}
+
 static esp_err_t claw_event_router_execute_send_message_action(
     const claw_event_router_rule_t *rule,
     const claw_event_router_action_t *action,
     const claw_event_t *event,
     cJSON *ctx,
+    const cJSON *metadata,
     claw_event_router_result_t *result)
 {
     cJSON *input_root = NULL;
@@ -1949,6 +1976,12 @@ static esp_err_t claw_event_router_execute_send_message_action(
 
     err = claw_event_router_send_text(event, channel, chat_id, message, cap_name, sizeof(cap_name),
                                       output, sizeof(output));
+    const char *image = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(metadata, "reply_image_url"));
+    if (err == ESP_OK && image && strcmp(event->source_cap, "claw_core") == 0 &&
+            strcmp(channel, event->source_channel) == 0 && strcmp(chat_id, event->chat_id) == 0 &&
+            !cJSON_HasObjectItem(ctx, "reply_image_sent") && cJSON_AddBoolToObject(ctx, "reply_image_sent", true)) {
+        (void)claw_event_router_send_image_url(event, image);
+    }
     if (err != ESP_OK && !cap_name[0]) {
         ESP_LOGW(TAG,
                  "send_message resolve failed channel=%s chat_id=%s err=%s",
@@ -2097,7 +2130,7 @@ static esp_err_t claw_event_router_execute_action(const claw_event_router_rule_t
         cJSON *metadata = strcmp(event->event_type, "out_message") == 0 && event->payload_json ? cJSON_Parse(event->payload_json) : NULL;
         const char *session_id = cJSON_GetStringValue(cJSON_GetObjectItem(metadata, "session_id"));
         if (session_id) (void)claw_session_mgr_set_delivery(session_id, "pending");
-        esp_err_t err = claw_event_router_execute_send_message_action(rule, action, event, ctx, result);
+        esp_err_t err = claw_event_router_execute_send_message_action(rule, action, event, ctx, metadata, result);
         if (session_id) (void)claw_session_mgr_set_delivery(session_id, err == ESP_OK ? "submitted" : "failed");
         cJSON_Delete(metadata);
         return err;
@@ -2171,8 +2204,8 @@ static esp_err_t claw_event_router_process_event(const claw_event_t *event,
         return ESP_OK;
     }
 
-    if (event->text && strcmp(event->event_type, "message") == 0 &&
-            strcmp(event->content_type, "text") == 0) {
+    if ((event->text && strcmp(event->event_type, "message") == 0 && strcmp(event->content_type, "text") == 0) ||
+            strcmp(event->event_type, "attachment_saved") == 0) {
         esp_err_t err = ESP_OK;
         if (claw_event_router_try_chat_command(event, &err)) {
             local.matched = true;
@@ -2694,7 +2727,7 @@ esp_err_t claw_event_router_set_chat_command_handler(claw_event_router_chat_comm
 
 bool claw_event_router_try_chat_command(const claw_event_t *event, esp_err_t *out_status)
 {
-    if (!s_runtime || !s_runtime->initialized || !event || !event->text || !out_status) {
+    if (!s_runtime || !s_runtime->initialized || !event || !out_status) {
         return false;
     }
     claw_event_router_lock();

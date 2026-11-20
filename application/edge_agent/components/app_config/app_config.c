@@ -13,6 +13,8 @@
 
 #include "settings_store.h"
 
+#define APP_DEFAULT_STICKER_RATE "50"
+
 #if CONFIG_APP_CLAW_CAP_MCP_CLIENT
 #include "cap_mcp_client.h"
 #include "esp_log.h"
@@ -80,6 +82,8 @@ static const app_config_field_t s_fields[] = {
     APP_CONFIG_FIELD(ap_password, "ap_password", ""),
     APP_CONFIG_FIELD(ap_behavior, "ap_behavior", "keep"),
     APP_CONFIG_FIELD(show_tool_progress, "show_tool_prog", "false"),
+    APP_CONFIG_FIELD(auto_stickers, "auto_stickers", "true"),
+    APP_CONFIG_FIELD(sticker_rate, "sticker_rate", APP_DEFAULT_STICKER_RATE),
     APP_CONFIG_FIELD(llm_api_key, "llm_api_key", APP_DEFAULT_LLM_API_KEY),
     APP_CONFIG_FIELD(llm_backend_type, "llm_backend", APP_DEFAULT_LLM_BACKEND_TYPE),
     APP_CONFIG_FIELD(llm_model, "llm_model", APP_DEFAULT_LLM_MODEL),
@@ -828,6 +832,24 @@ esp_err_t app_config_validate_wifi(const app_config_t *config, const char **mess
 bool app_config_show_tool_progress(const app_config_t *config)
 {
     return strcmp(config->show_tool_progress, "true") == 0 || strcmp(config->show_tool_progress, "1") == 0;
+}
+
+int app_config_parse_sticker_rate(const char *value)
+{
+    if (!value || !*value || strlen(value) > 3 || value[strspn(value, "0123456789")]) {
+        return -1;
+    }
+    int rate = atoi(value);
+    return rate <= 100 ? rate : -1;
+}
+
+unsigned app_config_auto_sticker_rate(const app_config_t *config)
+{
+    if (strcmp(config->auto_stickers, "true") != 0 && strcmp(config->auto_stickers, "1") != 0) {
+        return 0;
+    }
+    int rate = app_config_parse_sticker_rate(config->sticker_rate);
+    return rate >= 0 ? (unsigned)rate : (unsigned)atoi(APP_DEFAULT_STICKER_RATE);
 }
 
 void app_config_to_claw(const app_config_t *config, app_claw_config_t *out)

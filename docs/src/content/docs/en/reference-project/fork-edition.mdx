@@ -17,6 +17,8 @@ This fork ships on `feature/context-compaction` and is based on upstream [`a4edf
 | Web images | The upload endpoint accepts up to 512 KiB per file | Web Chat and Files compress larger images in the browser. They prioritize dimensions and detail while keeping the uploaded file within the endpoint limit. |
 | Incoming image cache | Incoming attachments are stored in the device inbox | QQ, Telegram, Feishu, WeChat, and Web Chat share a 1 MiB image cache. The oldest cached images are evicted under storage pressure, and failed transfers remove their temporary files. |
 | Hosted stickers | Chat platforms provide image-sending tools | `/sticker` looks up and sends a sticker on the device. The device handles links and uses zero model tokens. |
+| Cloud image and speech models | Chat platforms can exchange attachments | Configure HTTP image generation, speech synthesis, and transcription in Web settings. Image model drafts created in chat appear in the model list. |
+| Cache statistics and reminders | The device can call models and run scheduled tasks | See provider-reported input cache hit rates and manage one-time, interval, and daily reminders in Web settings. |
 | Web loading | The device serves the compressed page embedded in the firmware | Serves the full gzip asset so a dropped trailing byte cannot make the page fail to load. |
 | Session memory | Compaction starts at a session file size threshold | A context window setting adds a model-dependent compaction threshold. Compaction prioritizes recent turns and tries to summarize older content. |
 | Chat recovery | A model failure can surface as a raw error code | Chat shows Chinese messages for timeouts, rate limits, and insufficient space. Send `/retry` to retrieve the last saved answer or retry the last text question in the current conversation. |
@@ -33,6 +35,8 @@ This fork includes upstream Web conversation history. Refresh to restore chat re
 | `/help` | List commands and show the device date, LAN address, CPU, memory, token counts, and estimated chat context usage |
 | `/retry` | Retrieve the saved answer from the current conversation, or retry the last text question after a failure |
 | `/sticker [name]` | List hosted stickers or send the selected sticker |
+| `/image <prompt>` | Generate an image with the enabled cloud image model |
+| `/tts <text>` | Read text aloud with the enabled cloud speech model |
 | `/mcp models [offset]` | Read the default MCP server's advertised model catalogue. Paged catalogues accept a starting offset |
 | `/mcp last-image` | Resend a recent MCP-generated image from the original chat |
 
@@ -47,13 +51,16 @@ The upstream `/session` menu and replies have Simplified Chinese translations in
 - **Install a Python Skill.** When building, enable `App Claw Config → App Claw Capabilities → Enable MicroPython scripts for Skills` in `idf.py menuconfig`. Declare the `cap_micropython` tool group in the Skill's `SKILL.md`, then call `python_run_script` on `{CUR_SKILL_DIR}/scripts/...`, with JSON input in `args` and results via `print()`.
 - **Send a large image.** Select the image in Web Chat and send it when the upload is ready. Files of 512 KiB or smaller are uploaded as-is. For larger images, the browser attempts to preserve dimensions before lowering JPEG quality or resizing as necessary. A PNG converted to JPEG gets a white background, and a compressed animation keeps one frame. Use a vision model that accepts device-uploaded images.
 - **Send a hosted sticker.** Send `/sticker` for the catalogue and `/sticker 笑哭` to pick one. Web Chat, QQ, and Telegram send the image. Feishu and WeChat return the image link. To replace the defaults, upload a UTF-8 `stickers.txt` at the root of Files. Write one `name=https://image-host/image.png` entry per line and keep the file within 16 KiB. Each command reads the current file. Default images are from [Twemoji](https://github.com/jdecked/twemoji) by Twitter, Inc. and contributors, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Send contextual stickers.** Web Chat, QQ, and Telegram can add one fitting sticker to a reply. The model chooses from the first 12 usable catalogue entries during the same reply. In Enhancements, set the sending frequency from 0% to 100%. The default is 50% and applies when the model picks a sticker.
+- **Configure cloud media.** Open LLM → Cloud image and speech models. Share the image API URL, model ID, and docs in chat to create a draft, then fill in the key and enable the profile in Web settings. Image and speech generation read a media URL from the provider's response. Image generation can also poll the same provider for an asynchronous job. For transcription, the device streams the audio to the provider. Web accepts audio files up to 512 KiB.
+- **Check cache usage and set reminders.** `/help` shows the monthly input cache hit rate when available. The Chat Commands page shows daily and monthly figures. Its reminders section lets you pick a chat and schedule a one-time, interval, or daily message.
 - **Set the context window.** Enter the model's window in Enhancements, save, and restart the device. Use 0 or an empty value to match by model name. The device starts compaction at about 60% of that window, with a fallback threshold of about 150 KiB of session data. Use `/session new` to start a session and `/session list` to see existing ones.
 
 ## ESP32-S3 test coverage
 
 Chat help, token counts, MCP tool calls, a custom Python Skill, large Web image uploads, Skill folder uploads, and replies with full storage were tested on an ESP32-S3 with 16 MiB Flash and 8 MiB PSRAM. Local tests covered image cache limits, storage pressure, open files, repeated transfers, and interrupted transfers.
 
-With MicroPython enabled, this build produces a 2,963,936-byte application image, leaving about 906 KiB in the test board's 3,800 KiB app partition. Check the build output and partition table for your board.
+The latest ESP32-S3 test build produced a 3,041,056-byte application image, leaving about 830 KiB in the 3,800 KiB app partition. The board accepted sticker frequencies of 0% and 100%. Image generation and speech synthesis were tested on the board with a local mock API. Transcription passed local mock tests. Check the build output and partition table for your board.
 
 MicroPython is an optional embedded runtime. The test configuration allocates a 256 KiB PSRAM heap, and the runtime supports selected built-in modules and imports from the script directory. A script file can be up to 32 KiB, with a 1-second default timeout, a 5-second maximum, and up to 4,095 bytes of captured output. Skills that rely on desktop Python packages or system commands need adaptation. Use the existing Lua modules and capabilities for device and network I/O.
 

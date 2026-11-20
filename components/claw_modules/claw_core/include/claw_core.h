@@ -69,6 +69,14 @@ typedef struct {
     const char *target_chat_id;
 } claw_core_request_t;
 
+/** Optional app-owned instructions and final reply decoration. Register before starting cores. */
+typedef struct {
+    char *(*instructions)(const claw_core_request_t *request);
+    bool (*finalize)(const claw_core_request_t *request, char **text, bool has_images, char **image_url);
+} claw_core_reply_hooks_t;
+
+void claw_core_set_reply_hooks(const claw_core_reply_hooks_t *hooks);
+
 typedef enum {
     CLAW_CORE_CONTEXT_RECORD_USER = 1,
     CLAW_CORE_CONTEXT_RECORD_ASSISTANT_FINAL = 2,

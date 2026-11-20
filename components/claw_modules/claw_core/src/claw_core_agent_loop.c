@@ -14,6 +14,12 @@
 #include "llm/claw_llm_http_transport.h"
 
 static const char *TAG = "claw_core";
+static claw_core_reply_hooks_t s_reply_hooks;
+
+void claw_core_set_reply_hooks(const claw_core_reply_hooks_t *hooks)
+{
+    s_reply_hooks = hooks ? *hooks : (claw_core_reply_hooks_t){0};
+}
 
 static esp_err_t handle_pending_user_interrupts(claw_core_state_t *core,
                                                 const claw_core_request_item_t *request,
@@ -108,10 +114,13 @@ void claw_core_agent_loop_task(void *arg)
         cJSON *runtime_messages = NULL;
         cJSON *messages = NULL;
         char *system_prompt = NULL;
+        char *reply_instructions = NULL;
+        char *reply_image_url = NULL;
         char *tools_json = NULL;
         char tool_summary[CLAW_CORE_TOOL_SUMMARY_MAX_LEN] = {0};
         claw_core_llm_response_t llm_response = {0};
         uint32_t iteration = 0;
+        unsigned mcp_failed_rounds = 0;
         esp_err_t err = ESP_OK;
         char obs_providers_csv[CLAW_CORE_OBS_CSV_MAX] = {0};
         char obs_tool_calls_csv[CLAW_CORE_OBS_CSV_MAX] = {0};
@@ -241,6 +250,7 @@ void claw_core_agent_loop_task(void *arg)
             inject_active_user = false;
         }
 
+        if (s_reply_hooks.instructions) reply_instructions = s_reply_hooks.instructions(&request.view);
         while (true) {
             claw_core_llm_response_free(&llm_response);
             free(system_prompt);
@@ -264,6 +274,7 @@ void claw_core_agent_loop_task(void *arg)
                     goto finish_request;
                 }
                 if (drained) {
+                    mcp_failed_rounds = 0;
                     continue;
                 }
             }
@@ -299,11 +310,19 @@ void claw_core_agent_loop_task(void *arg)
                     goto finish_request;
                 }
                 if (drained) {
+                    mcp_failed_rounds = 0;
                     continue;
                 }
             }
 
             claw_core_control_set_phase(core, CLAW_CORE_AGENT_LOOP_PHASE_IN_LLM_HTTP);
+            if (reply_instructions) {
+                char *with_instructions = claw_utils_string_dup_printf("%s\n\n%s", system_prompt, reply_instructions);
+                if (with_instructions) {
+                    free(system_prompt);
+                    system_prompt = with_instructions;
+                }
+            }
             err = claw_core_llm_chat_messages(core,
                                               system_prompt,
                                               messages,
@@ -326,6 +345,7 @@ void claw_core_agent_loop_task(void *arg)
                         goto finish_request;
                     }
                     if (drained) {
+                        mcp_failed_rounds = 0;
                         continue;
                     }
                 }
@@ -361,6 +381,7 @@ void claw_core_agent_loop_task(void *arg)
                     goto finish_request;
                 }
                 if (drained) {
+                    mcp_failed_rounds = 0;
                     continue;
                 }
             }
@@ -376,6 +397,7 @@ void claw_core_agent_loop_task(void *arg)
             }
 
             char *tool_results_json = NULL;
+            bool mcp_failed = false;
             const char *assistant_tool_message_json = llm_response.raw_message_json;
 
             err = claw_core_append_assistant_tool_calls(runtime_messages, &llm_response);
@@ -390,7 +412,8 @@ void claw_core_agent_loop_task(void *arg)
                                                          &request.view,
                                                          tool_summary,
                                                          sizeof(tool_summary),
-                                                         &tool_results_json);
+                                                         &tool_results_json,
+                                                         &mcp_failed);
             if (err != ESP_OK) {
                 response.view.error_message = claw_utils_string_dup(esp_err_to_name(err));
                 goto finish_request;
@@ -416,6 +439,12 @@ void claw_core_agent_loop_task(void *arg)
                 cJSON_free(tool_results_json);
             }
 
+            mcp_failed_rounds = mcp_failed ? mcp_failed_rounds + 1 : 0;
+            if (mcp_failed_rounds >= 2) {
+                err = ESP_ERR_INVALID_RESPONSE;
+                response.view.error_message = claw_utils_string_dup("Consecutive MCP tool failures");
+                goto finish_request;
+            }
             iteration++;
             if (iteration >= core->max_tool_iterations) {
                 response.view.error_message = claw_utils_string_dup("cap tool iteration limit reached");
@@ -430,7 +459,10 @@ void claw_core_agent_loop_task(void *arg)
             cJSON *reply_images = core->reply_images;
             core->reply_images = NULL;
             xSemaphoreGive(core->inflight_lock);
-            const char *final_json = cJSON_GetArraySize(reply_images) ? NULL : llm_response.raw_message_json;
+            bool has_images = cJSON_GetArraySize(reply_images) != 0;
+            bool changed = reply_instructions && s_reply_hooks.finalize &&
+                           s_reply_hooks.finalize(&request.view, &response.view.text, has_images, &reply_image_url);
+            const char *final_json = has_images || changed ? NULL : llm_response.raw_message_json;
             claw_core_append_reply_images(reply_images, &response.view.text);
             cJSON_Delete(reply_images);
 
@@ -524,7 +556,9 @@ finish_request:
                 }
             }
         }
-        claw_core_publish_out_message_if_requested(&request, &response, final_persisted);
+        claw_core_publish_out_message_if_requested(&request, &response, final_persisted, reply_image_url);
+        free(reply_image_url);
+        free(reply_instructions);
         if (request.view.flags & CLAW_CORE_REQUEST_FLAG_SKIP_RESPONSE_QUEUE) {
             claw_core_free_response_item(&response);
         } else if (claw_core_response_push(core, &response) != ESP_OK) {

@@ -10,6 +10,7 @@
 
 /* Initialize after NVS and the device timezone are configured. */
 esp_err_t app_chat_help_init(void);
+void app_chat_help_set_auto_sticker_rate(unsigned rate);
 
 /* Register after the router and its outbound bindings are ready. */
 esp_err_t app_chat_help_register(void);

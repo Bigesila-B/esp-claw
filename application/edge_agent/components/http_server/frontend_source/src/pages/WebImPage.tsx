@@ -3,7 +3,7 @@ import { For, Show, createEffect, createMemo, createSignal, onMount, type Compon
 import { ChevronDown, ImagePlus, LoaderCircle, MessageSquare, MoreHorizontal, PanelLeft, Plus, SendHorizontal, X } from 'lucide-solid';
 import { createFolder, uploadFile, type WebImSession } from '../api/client';
 import { createWebChat } from '../state/webim';
-import { t, tf } from '../i18n';
+import { currentLocale, t, tf } from '../i18n';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
 import { MarkdownMessage, loadMarkdownRuntime } from '../components/webim/MarkdownMessage';
@@ -11,6 +11,9 @@ import { ChatHelpMessage } from '../components/webim/ChatHelpMessage';
 import { ChatImageMessage } from '../components/webim/ChatImageMessage';
 import { imageUploadSize, prepareImageUpload } from '../utils/imageUpload';
 import { pushToast } from '../state/toast';
+
+const audioFile = (name: string) => /\.(mp3|wav|ogg|oga|opus|m4a|aac|silk|amr|webm|flac)$/i.test(name);
+const voiceUrl = (text: string) => /^\[ESP-Claw 语音\]\(<(https?:\/\/[^<>\s]+)>\)$/.exec(text)?.[1];
 
 export const WebImPage: Component = () => {
   const chat = createWebChat();
@@ -54,11 +57,20 @@ export const WebImPage: Component = () => {
     const id = chat.active();
     setUploading(true); setActionError('');
     try {
-      const upload = await prepareImageUpload(file);
+      const audio = audioFile(file.name);
+      const files = chat.threads[id]?.files ?? [];
+      const zh = currentLocale() === 'zh-cn';
+      if ((audio && files.length) || files.some(audioFile)) {
+        throw new Error(zh ? '语音请单独发送。' : 'Send audio on its own.');
+      }
+      if (audio && file.size > 512 * 1024) {
+        throw new Error(zh ? '语音上传上限为 512 KiB。' : 'The audio upload limit is 512 KiB.');
+      }
+      const upload = audio ? file : await prepareImageUpload(file);
       const path = `/inbox/webim/${Date.now().toString(36)}_${upload.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       await createFolder('/inbox/webim');
       await uploadFile(path, upload);
-      chat.files(id, [...(chat.threads[id]?.files ?? []), path]);
+      chat.files(id, [...files, path]);
       pushToast(upload === file ? t('webimUploaded') : tf('uploadImageCompressed', { size: imageUploadSize(upload) }), 'info', 3000);
     }
     catch (e) { setActionError((e as Error).message); }
@@ -141,7 +153,9 @@ export const WebImPage: Component = () => {
               <article class={`min-w-0 text-[0.9rem] leading-7 ${message.role === 'user' ? 'max-w-[88%] self-end rounded-2xl bg-white/7 px-4 py-2.5' : 'w-full self-start'}`} data-role={message.role}>
                 <Show when={message.text.startsWith('ESP-Claw /help\n')} fallback={
                   <Show when={message.role === 'assistant'} fallback={<MarkdownMessage preview={markdown()} text={message.text} />}>
-                    <ChatImageMessage text={message.text} renderText={text => <MarkdownMessage preview={markdown()} text={text} />} />
+                    <Show when={voiceUrl(message.text)} fallback={<ChatImageMessage text={message.text} renderText={text => <MarkdownMessage preview={markdown()} text={text} />} />}>
+                      {url => <audio controls preload="none" src={url()} />}
+                    </Show>
                   </Show>
                 }>
                   <ChatHelpMessage text={message.text} />
@@ -167,7 +181,7 @@ export const WebImPage: Component = () => {
             <textarea ref={inputEl} aria-label={t('webimPlaceholder')} class="block min-h-16 w-full resize-none border-0 bg-transparent text-sm leading-6 outline-none" placeholder={t('webimPlaceholder')} value={chat.thread().draft} onInput={e => chat.draft(e.currentTarget.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (canSend()) { bottom(); void chat.send(); } } }} />
             <Show when={chat.thread().files.length}><div class="mb-2 flex flex-wrap gap-2"><For each={chat.thread().files}>{file => <span class="flex items-center gap-1 rounded bg-white/5 px-2 py-1 text-xs">{file.split('/').pop()}<button aria-label={t('chatAttachRemove')} onClick={() => chat.files(chat.active(), chat.thread().files.filter(p => p !== file))}><X size={12} /></button></span>}</For></div></Show>
             <div class="flex items-center justify-between">
-              <input ref={fileEl} type="file" accept="image/*" class="hidden" onChange={e => void upload(e)} />
+              <input ref={fileEl} type="file" accept="image/*,.mp3,.wav,.ogg,.oga,.opus,.m4a,.aac,.silk,.amr,.webm,.flac" class="hidden" onChange={e => void upload(e)} />
               <Button variant="ghost" size="xs" aria-label={t('webimAttach')} disabled={uploading() || chat.thread().files.length >= 4} onClick={() => fileEl?.click()}><Show when={uploading()} fallback={<ImagePlus size={18} />}><LoaderCircle size={18} class="animate-spin" /></Show></Button>
               <Button variant="primary" size="sm" aria-label={t('webimSend')} disabled={!canSend() || (!chat.thread().draft.trim() && !chat.thread().files.length)} onClick={() => { bottom(); void chat.send(); }}><SendHorizontal size={17} />{t('webimSend')}</Button>
             </div>

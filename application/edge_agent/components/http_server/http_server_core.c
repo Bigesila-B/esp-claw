@@ -74,7 +74,7 @@ esp_err_t http_server_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.ctrl_port = HTTP_SERVER_CTRL_PORT;
-    config.max_uri_handlers = 48;
+    config.max_uri_handlers = 56;
     config.stack_size = 8192;
     config.max_open_sockets = 12;
     config.lru_purge_enable = true;
@@ -100,6 +100,7 @@ esp_err_t http_server_start(void)
 #endif
     ESP_RETURN_ON_ERROR(http_server_register_status_routes(s_ctx.server), TAG, "Failed to register status routes");
     ESP_RETURN_ON_ERROR(http_server_register_chat_help_routes(s_ctx.server), TAG, "Failed to register chat help routes");
+    ESP_RETURN_ON_ERROR(http_server_register_cloud_routes(s_ctx.server), TAG, "Failed to register media and scheduler routes");
     ESP_RETURN_ON_ERROR(http_server_register_skill_catalog_routes(s_ctx.server), TAG, "Failed to register skill catalog routes");
     ESP_RETURN_ON_ERROR(http_server_register_files_routes(s_ctx.server), TAG, "Failed to register files routes");
 #if CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER

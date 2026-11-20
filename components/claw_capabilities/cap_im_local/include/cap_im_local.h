@@ -27,6 +27,7 @@ typedef struct {
     const char *link_label;
     int64_t timestamp_ms;
     bool persisted;
+    bool save_to_history;
 } cap_im_local_message_t;
 
 typedef esp_err_t (*cap_im_local_outbound_callback_t)(const cap_im_local_message_t *message,
